@@ -302,11 +302,16 @@ exec "$DIR/llvm/bin/clang++" --target={TRIPLE} --sysroot="$DIR/sysroot" "$@"
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 exec "$DIR/llvm/bin/clang" --target={TRIPLE} --sysroot="$DIR/sysroot" -E "$@"
 """
+    rust_linker_script = f"""#!/bin/sh
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec "$DIR/llvm/bin/clang" "$@" --target={TRIPLE} --sysroot="$DIR/sysroot" "$DIR/sysroot/lib/libclang_rt.builtins-wasm64.a"
+"""
     for name in ("clang", "gcc", "cc"):
         write_exec(bin_dir / f"{TRIPLE}-{name}", cc_script)
     for name in ("clang++", "g++", "c++"):
         write_exec(bin_dir / f"{TRIPLE}-{name}", cxx_script)
     write_exec(bin_dir / f"{TRIPLE}-cpp", cpp_script)
+    write_exec(bin_dir / f"{TRIPLE}-rust-linker", rust_linker_script)
 
     for short, llvm_tool in {
         "ar": "llvm-ar",
@@ -533,6 +538,14 @@ def main() -> None:
 
     # 5. compiler-rt builtins
     build_compiler_rt(llvm_src, prefix, work / "build-compiler-rt", args.jobs)
+
+    # 5b. Rust target spec & build-std helper
+    rust_src_dir = TOOLCHAIN_DIR / "rust"
+    if rust_src_dir.is_dir():
+        rust_dst = prefix / "rust"
+        shutil.copytree(rust_src_dir, rust_dst, dirs_exist_ok=True)
+        for py in rust_dst.glob("*.py"):
+            py.chmod(0o755)
 
     # 6. Metadata
     meta = {

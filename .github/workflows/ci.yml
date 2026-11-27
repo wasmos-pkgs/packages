@@ -93,8 +93,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache lld zstd curl git python3
 
-      - name: Setup Rust toolchain (for wasmos-postlink)
+      - name: Setup Rust toolchain (for wasmos-postlink & Rust target smoke-test)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
 
       - name: Restore ccache for LLVM
         id: ccache-restore
@@ -121,7 +123,7 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           key: llvm-ccache-${{ hashFiles('toolchain/patches/**') }}
 
-      - name: Smoke-test compiled toolchain
+      - name: Smoke-test compiled toolchain (C and Rust std)
         run: |
           mkdir -p /tmp/test-tc
           tar --zstd -xf dist/toolchain.tar.zst -C /tmp/test-tc
@@ -131,6 +133,21 @@ jobs:
           EOF
           /tmp/test-tc/bin/wasm64-submilli-linux-musl-clang -O2 /tmp/hello.c -o /tmp/hello.wasm
           ls -lh /tmp/hello.wasm
+
+          mkdir -p /tmp/rust-smoke/src
+          cat <<'EOF' > /tmp/rust-smoke/Cargo.toml
+          [package]
+          name = "rust-smoke"
+          version = "0.1.0"
+          edition = "2021"
+          EOF
+          cat <<'EOF' > /tmp/rust-smoke/src/main.rs
+          fn main() {
+              println!("hello from rust std: {:?}", std::env::args().collect::<Vec<_>>());
+          }
+          EOF
+          python3 /tmp/test-tc/rust/cargo-wasmos.py --toolchain /tmp/test-tc -- build --release --manifest-path /tmp/rust-smoke/Cargo.toml
+          ls -lh /tmp/rust-smoke/target/wasm64-submilli-linux-musl/release/rust-smoke
 
       - name: Publish toolchain to GHCR
         if: needs.plan.outputs.should_push == 'true'
