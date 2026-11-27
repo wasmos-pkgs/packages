@@ -69,7 +69,7 @@ COMPILER_RT_SOURCES = [
     "floatditf.c", "floatsitf.c", "floattitf.c",
     "floatunditf.c", "floatunsitf.c", "floatuntitf.c",
     "multc3.c", "multf3.c", "powitf2.c", "subtf3.c",
-    "trunctfdf2.c", "trunctfhf2.c", "trunctfsf.c",
+    "trunctfdf2.c", "trunctfhf2.c", "trunctfsf2.c",
 ]
 
 RE_USER = re.compile(r"([\s(])(?:__user|__force|__iomem)(?=\s)")
