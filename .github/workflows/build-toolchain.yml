@@ -45,14 +45,14 @@ jobs:
       - name: Restore ccache for LLVM
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: ${{ github.workspace }}/.ccache
           key: llvm-ccache-${{ hashFiles('toolchain/toolchain.toml', 'toolchain/patches/**') }}
           restore-keys: |
             llvm-ccache-
 
       - name: Build wasm64-submilli-linux-musl toolchain
         env:
-          CCACHE_DIR: ${{ env.HOME }}/.ccache
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 4G
         run: |
           ccache --zero-stats
