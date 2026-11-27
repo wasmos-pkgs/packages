@@ -1,0 +1,15 @@
+[package]
+name = "curl"
+version = "8.12.1"
+rev = 0
+kind = "runtime"
+description = "curl 8.12.1 HTTP/HTTPS client statically linked with OpenSSL 3.4.1 and zlib for wasm64-submilli-linux-musl"
+license = "curl"
+homepage = "https://curl.se/"
+build_deps = ["zlib", "openssl"]
+runtime_deps = []
+
+[source]
+url = "https://curl.se/download/curl-8.12.1.tar.gz"
+sha256 = "7b40ea64947e0b440716a4d7f0b7aa56230a5341c8377d7b609649d4aea8dbcf"
+strip_components = 1

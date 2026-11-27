@@ -1261,9 +1261,10 @@ struct FuncEmitter<'m> {
     added_locals: Vec<EncValType>,
     saved_locals: Vec<(u32, ValType)>,
     rewind_site_local: u32,
+    unwind_site_local: u32,
     kb_addr_local: u32,
     frame_ptr_local: u32,
-    /// Stack of scopes: `true` = real original label, `false` = synthetic `if` wrapper.
+    /// Stack of scopes: `true` = real original label, `false` = synthetic wrapper.
     label_stack: Vec<bool>,
     marker: std::marker::PhantomData<&'m ()>,
 }
@@ -1293,12 +1294,14 @@ impl<'m> FuncEmitter<'m> {
             added_locals: Vec::new(),
             saved_locals,
             rewind_site_local: 0,
+            unwind_site_local: 0,
             kb_addr_local: 0,
             frame_ptr_local: 0,
             label_stack: vec![true], // function body is outermost real label
             marker: std::marker::PhantomData,
         };
         emitter.rewind_site_local = emitter.alloc_temp_local(ValType::I32)?;
+        emitter.unwind_site_local = emitter.alloc_temp_local(ValType::I32)?;
         emitter.kb_addr_local = emitter.alloc_temp_local(ValType::I64)?;
         emitter.frame_ptr_local = emitter.alloc_temp_local(ValType::I64)?;
         Ok(emitter)
@@ -1417,11 +1420,11 @@ impl<'m> FuncEmitter<'m> {
         Ok(())
     }
 
-    fn emit_unwind_spill(
+    /// Per-callsite O(1) unwind check: records `site_id` in `unwind_site_local` and branches
+    /// to the shared per-function `$unwind_exit` epilogue block (`O(S + L)` instead of `O(S * L)`).
+    fn emit_unwind_branch(
         &self,
         site_id: u32,
-        frame_bytes: u64,
-        entries: &[(u32, ValType, u64)],
         out: &mut Vec<Instruction<'m>>,
     ) -> Result<(), PostlinkError> {
         // if (i32.load(kb + STATE_OFFSET) == STATE_UNWINDING)
@@ -1432,9 +1435,27 @@ impl<'m> FuncEmitter<'m> {
         ));
         out.push(Instruction::I32Eq);
         out.push(Instruction::If(EncBlockType::Empty));
+        out.push(Instruction::I32Const(
+            i32::try_from(site_id).unwrap_or(i32::MAX),
+        ));
+        out.push(Instruction::LocalSet(self.unwind_site_local));
+        // `self.label_stack[1]` is `$unwind_exit`; accounting for this `If` itself (+1),
+        // its relative branch depth is `(self.label_stack.len() + 1) - 2 = self.label_stack.len() - 1`.
+        let unwind_depth = u32::try_from(self.label_stack.len().saturating_sub(1))
+            .map_err(|_| PostlinkError::InvalidIndex("unwind_depth"))?;
+        out.push(Instruction::Br(unwind_depth));
+        out.push(Instruction::End);
+        Ok(())
+    }
 
-        // frame_ptr = i64.load(kb + FRAME_BUF_TOP_OFFSET)
-        out.push(Instruction::LocalGet(self.kb_addr_local));
+    /// Emitted once per instrumented function after `end $unwind_exit`.
+    fn emit_unwind_epilogue(
+        &self,
+        frame_bytes: u64,
+        entries: &[(u32, ValType, u64)],
+        out: &mut Vec<Instruction<'m>>,
+    ) -> Result<(), PostlinkError> {
+        self.emit_compute_kb_addr(out);
         out.push(Instruction::I64Load(memarg_64(
             kernel_block::FRAME_BUF_TOP_OFFSET,
             3,
@@ -1466,12 +1487,13 @@ impl<'m> FuncEmitter<'m> {
             3,
         )));
 
-        // Store site_id at frame_ptr + 0
+        // Store i64.extend_i32_u(unwind_site_local) at frame_ptr + 0
         out.push(Instruction::LocalGet(self.frame_ptr_local));
-        out.push(Instruction::I64Const(i64::from(site_id)));
+        out.push(Instruction::LocalGet(self.unwind_site_local));
+        out.push(Instruction::I64ExtendI32U);
         out.push(Instruction::I64Store(memarg_64(0, 3)));
 
-        // Store all saved scalar locals
+        // Store all saved scalar locals once
         for &(local_idx, ty, off) in entries {
             out.push(Instruction::LocalGet(self.frame_ptr_local));
             out.push(Instruction::LocalGet(local_idx));
@@ -1488,8 +1510,6 @@ impl<'m> FuncEmitter<'m> {
         for &rty in &self.func_results {
             Self::emit_dummy_value(rty, out)?;
         }
-        out.push(Instruction::Return);
-        out.push(Instruction::End);
         Ok(())
     }
 
@@ -1706,9 +1726,15 @@ impl<'m> FuncEmitter<'m> {
         let (frame_bytes, entries) = self.frame_layout()?;
 
         let mut instrs: Vec<Instruction<'m>> = Vec::new();
+        instrs.push(Instruction::Block(EncBlockType::Empty));
+        self.label_stack.push(false); // index 1 = $unwind_exit
         self.emit_rewind_prologue(frame_bytes, &entries, &mut instrs)?;
-        self.emit_planned_scope(&mut plan, frame_bytes, &entries, &mut instrs)?;
-        instrs.push(Instruction::End);
+        self.emit_planned_scope(&mut plan, &mut instrs)?;
+        let _ = self.label_stack.pop();
+        instrs.push(Instruction::Return);
+        instrs.push(Instruction::End); // end $unwind_exit
+        self.emit_unwind_epilogue(frame_bytes, &entries, &mut instrs)?;
+        instrs.push(Instruction::End); // end function
 
         let local_decls: Vec<(u32, EncValType)> =
             self.added_locals.iter().map(|&ty| (1, ty)).collect();
@@ -2009,8 +2035,6 @@ impl<'m> FuncEmitter<'m> {
     fn emit_planned_scope(
         &mut self,
         plan: &mut PlannedScope<'m>,
-        frame_bytes: u64,
-        entries: &[(u32, ValType, u64)],
         out: &mut Vec<Instruction<'m>>,
     ) -> Result<(), PostlinkError> {
         if !plan.param_locals.is_empty() {
@@ -2081,7 +2105,7 @@ impl<'m> FuncEmitter<'m> {
                         out.push(Instruction::LocalSet(loc));
                     }
 
-                    self.emit_unwind_spill(*site_id, frame_bytes, entries, out)?;
+                    self.emit_unwind_branch(*site_id, out)?;
 
                     let _ = self.label_stack.pop();
                     out.push(Instruction::End);
@@ -2122,7 +2146,7 @@ impl<'m> FuncEmitter<'m> {
                         }
                     }
                     self.label_stack.push(true);
-                    self.emit_planned_scope(inner, frame_bytes, entries, out)?;
+                    self.emit_planned_scope(inner, out)?;
                     let _ = self.label_stack.pop();
                     out.push(Instruction::End);
 
@@ -2172,7 +2196,7 @@ impl<'m> FuncEmitter<'m> {
                     self.label_stack.push(true);
                     match then_plan {
                         IfBranchPlan::Fork(inner) => {
-                            self.emit_planned_scope(inner, frame_bytes, entries, out)?;
+                            self.emit_planned_scope(inner, out)?;
                         }
                         IfBranchPlan::Plain(plain_nodes) => {
                             self.emit_plain_nodes(plain_nodes, out)?;
@@ -2182,7 +2206,7 @@ impl<'m> FuncEmitter<'m> {
                         out.push(Instruction::Else);
                         match else_plan {
                             IfBranchPlan::Fork(inner) => {
-                                self.emit_planned_scope(inner, frame_bytes, entries, out)?;
+                                self.emit_planned_scope(inner, out)?;
                             }
                             IfBranchPlan::Plain(plain_nodes) => {
                                 self.emit_plain_nodes(plain_nodes, out)?;

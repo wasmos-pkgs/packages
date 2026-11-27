@@ -74,7 +74,7 @@ COMPILER_RT_SOURCES = [
 
 RE_USER = re.compile(r"([\s(])(?:__user|__force|__iomem)(?=\s)")
 RE_ATTR_CONST = re.compile(r"__attribute_const__(?=\s|$)")
-RE_COMPILER_INC = re.compile(r"^#include <linux/compiler(?:|_types)\.h>\s*$", re.MULTILINE)
+RE_COMPILER_INC = re.compile(r"^#include <linux/compiler(?:|_types)\.h>.*$", re.MULTILINE)
 RE_PACKED = re.compile(r"(^|[^a-zA-Z0-9])__packed([^a-zA-Z0-9_]|$)", re.MULTILINE)
 RE_KW = re.compile(r"(^|[\s(])(inline|asm|volatile)(?=[\s(]|$)", re.MULTILINE)
 RE_UAPI_GUARD = re.compile(r"^#(ifndef|define|endif\s*/\*)\s*_UAPI", re.MULTILINE)
@@ -185,7 +185,18 @@ def install_uapi_headers(linux_src: pathlib.Path, dest_inc: pathlib.Path) -> Non
         "#define LINUX_VERSION_SUBLEVEL 0\n",
         encoding="utf-8",
     )
-    print(f"Installed {count + 1} sanitized Linux 6.12 UAPI headers -> {dest_inc}", flush=True)
+    compiler_h = dest_inc / "linux/compiler.h"
+    compiler_h.write_text(
+        "#ifndef _LINUX_COMPILER_H\n"
+        "#define _LINUX_COMPILER_H\n"
+        "#define __user\n"
+        "#define __force\n"
+        "#define __iomem\n"
+        "#define __rcu\n"
+        "#endif\n",
+        encoding="utf-8",
+    )
+    print(f"Installed {count + 2} sanitized Linux 6.12 UAPI headers -> {dest_inc}", flush=True)
 
 
 def copy_tree(src: pathlib.Path, dst: pathlib.Path) -> None:

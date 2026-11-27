@@ -106,14 +106,22 @@ def main() -> None:
         check=True,
     )
 
+    shutil.rmtree(install_prefix / "bin", ignore_errors=True)
+
     lib_dir = install_prefix / "lib"
     for alias in ("libncurses.a", "libtinfo.a", "libtermcap.a", "libcurses.a"):
         symlink_force("libncursesw.a", lib_dir / alias)
+    if (lib_dir / "libpanelw.a").exists():
+        symlink_force("libpanelw.a", lib_dir / "libpanel.a")
 
     inc_ncursesw = install_prefix / "include/ncursesw"
     inc_ncurses = install_prefix / "include/ncurses"
     if inc_ncursesw.is_dir() and not inc_ncurses.exists():
         symlink_force("ncursesw", inc_ncurses)
+
+    for p in DESTDIR.rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            p.chmod(0o644)
 
     lib_path = lib_dir / "libncursesw.a"
     print(f"Built ncurses-6.5 -> {lib_path} ({lib_path.stat().st_size} bytes)", flush=True)

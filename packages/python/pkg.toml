@@ -1,0 +1,15 @@
+[package]
+name = "python"
+version = "3.13.2"
+rev = 0
+kind = "runtime"
+description = "CPython 3.13.2 interpreter and standard library (SSL, SQLite3, zlib, bz2, lzma, curses, epoll, asyncio) for wasm64-submilli-linux-musl"
+license = "PSF-2.0"
+homepage = "https://www.python.org/"
+build_deps = ["zlib", "bzip2", "xz", "sqlite", "openssl", "ncurses"]
+runtime_deps = []
+
+[source]
+url = "https://www.python.org/ftp/python/3.13.2/Python-3.13.2.tar.xz"
+sha256 = "d984bcc57cd67caab26f7def42e523b1c015bbc5dc07836cf4f0b63fa159eb56"
+strip_components = 1

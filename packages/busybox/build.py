@@ -108,7 +108,7 @@ ENABLED_OPTIONS = [
     "CONFIG_WGET", "CONFIG_FEATURE_WGET_LONG_OPTIONS", "CONFIG_FEATURE_WGET_STATUSBAR",
     "CONFIG_FEATURE_WGET_HTTPS",
     "CONFIG_NSLOOKUP", "CONFIG_WHOIS", "CONFIG_TELNET",
-    "CONFIG_HTTPD", "CONFIG_IFCONFIG", "CONFIG_NETSTAT",
+    "CONFIG_HTTPD", "CONFIG_IFCONFIG", "CONFIG_FEATURE_IFCONFIG_STATUS", "CONFIG_NETSTAT",
     "CONFIG_IP", "CONFIG_FEATURE_IP_ADDRESS", "CONFIG_FEATURE_IP_LINK", "CONFIG_FEATURE_IP_ROUTE",
 ]
 
@@ -141,6 +141,16 @@ def set_config_options(cfg_path: pathlib.Path, enabled: list[str]) -> None:
 
 
 def main() -> None:
+    sysroot_env = os.environ.get("WASMOS_SYSROOT")
+    if sysroot_env:
+        compiler_h = pathlib.Path(sysroot_env) / "include/linux/compiler.h"
+        if not compiler_h.exists():
+            compiler_h.parent.mkdir(parents=True, exist_ok=True)
+            compiler_h.write_text(
+                "#ifndef _LINUX_COMPILER_H\n#define _LINUX_COMPILER_H\n"
+                "#define __user\n#define __force\n#define __iomem\n#define __rcu\n#endif\n",
+                encoding="utf-8",
+            )
     BUILD.mkdir(parents=True, exist_ok=True)
     run_make("allnoconfig")
 

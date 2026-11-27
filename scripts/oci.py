@@ -297,7 +297,7 @@ def pull_oci_archive(repo: str, tag: str, dest: pathlib.Path, *, strip_usr: bool
                 tar_cmd.append("-z")
             tar_cmd.extend(["-xf", str(tmp_blob), "-C", str(dest)])
             if strip_usr:
-                tar_cmd.extend(["--strip-components=1"])
+                tar_cmd.extend(["--strip-components=1", "usr"])
             subprocess.run(tar_cmd, check=True)
         finally:
             if tmp_blob.exists():
