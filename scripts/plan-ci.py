@@ -135,6 +135,13 @@ def main() -> None:
                     raise SystemExit(f"Unknown package requested: '{name}'")
                 seeds.add(name)
     elif args.toolchain == "auto":
+        head_msg = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%B", args.head],
+            cwd=REPO_ROOT,
+            text=True,
+        )
+        if "[rebuild toolchain]" in head_msg.lower() or "[rebuild-toolchain]" in head_msg.lower():
+            build_toolchain = True
         files = changed_files(args.base, args.head)
         rebuild_all_pkgs = False
         for f in files:

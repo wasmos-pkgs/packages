@@ -41,7 +41,7 @@ def main() -> None:
     env["STRIP"] = str(CROSS_BIN / f"{TRIPLE}-strip")
     env["CC_FOR_BUILD"] = host_cc
     env["CFLAGS"] = "-O2"
-    env["CFLAGS_FOR_BUILD"] = "-O2 -Wno-implicit-function-declaration"
+    env["CFLAGS_FOR_BUILD"] = "-O2 -std=gnu17 -Wno-implicit-function-declaration"
 
     cross_cache_vars = [
         "bash_cv_func_sigsetjmp=present",
