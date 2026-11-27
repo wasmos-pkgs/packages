@@ -74,8 +74,8 @@ def patch_library_dir(lib_dir: pathlib.Path) -> pathlib.Path:
     patch_once(
         lib_dir / "unwind/src/lib.rs",
         'target_arch = "wasm64"',
-        '        target_os = "nuttx",\n    ) => {',
-        '        target_os = "nuttx",\n        target_arch = "wasm64",\n    ) => {',
+        'target_os = "espidf",',
+        'target_os = "espidf",\n        target_arch = "wasm64",',
     )
     patch_once(
         lib_dir / "unwind/src/lib.rs",
@@ -87,29 +87,29 @@ def patch_library_dir(lib_dir: pathlib.Path) -> pathlib.Path:
     patch_once(
         lib_dir / "panic_unwind/src/lib.rs",
         'target_arch = "wasm64"',
-        'all(target_family = "unix", not(any(target_os = "espidf", target_os = "nuttx"))),',
-        'all(target_family = "unix", not(any(target_os = "espidf", target_os = "nuttx", target_arch = "wasm64"))),',
+        'target_os = "espidf"',
+        'target_os = "espidf", target_arch = "wasm64"',
     )
     # 5. std/src/sys/personality/mod.rs: wasm64 uses Wasm EH personality stub (not libunwind gcc.rs)
     patch_once(
         lib_dir / "std/src/sys/personality/mod.rs",
         'target_arch = "wasm64"',
-        'any(target_env = "msvc", target_family = "wasm", target_os = "motor") => {',
-        'any(target_env = "msvc", target_family = "wasm", target_arch = "wasm64", target_os = "motor") => {',
+        'target_family = "wasm"',
+        'target_family = "wasm", target_arch = "wasm64"',
     )
     # 6. backtrace: wasm64 uses noop backtrace (no native libunwind _Unwind_Backtrace)
     patch_once(
         lib_dir / "backtrace/src/backtrace/mod.rs",
         'not(target_arch = "wasm64")',
-        '                not(target_os = "emscripten"),',
-        '                not(target_os = "emscripten"),\n                not(target_arch = "wasm64"),',
+        'not(target_os = "emscripten"),',
+        'not(target_os = "emscripten"),\n                not(target_arch = "wasm64"),',
     )
     # 7. compiler-builtins: wasm64 float comparison libcalls return i32 (matching LLVM WebAssembly ABI)
     patch_once(
         lib_dir / "compiler-builtins/compiler-builtins/src/float/cmp.rs",
         'target_arch = "wasm64"',
-        'if #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec", target_family = "wasm"))] {',
-        'if #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec", target_family = "wasm", target_arch = "wasm64"))] {',
+        'target_arch = "arm64ec", target_family = "wasm"',
+        'target_arch = "arm64ec", target_family = "wasm", target_arch = "wasm64"',
     )
 
     # 2. Patch vendored libc inside rust-src
