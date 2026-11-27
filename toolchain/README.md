@@ -15,7 +15,7 @@ This folder builds the C/C++ cross-compiler that turns normal Linux programs (li
 
 Compiling LLVM from scratch takes ~15–20 minutes, so we don't rebuild it for every package:
 
-1. When anything in `toolchain/` changes, `.github/workflows/build-toolchain.yml` runs `toolchain/build.py` and uploads the finished archive to `ghcr.io/wasmos-pkgs/toolchain:latest`.
+1. When anything in `toolchain/` changes, `.github/workflows/ci.yml` runs `toolchain/build.py` and uploads the finished archive to `ghcr.io/wasmos-pkgs/toolchain:latest` before any package jobs run.
 2. Package builds simply download and extract that archive in a few seconds and immediately start compiling packages with `wasm64-submilli-linux-musl-clang`.
 
 ## Building Locally

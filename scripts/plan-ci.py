@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compute affected packages and topological build waves for GitHub Actions CI.
+"""Compute toolchain rebuild flag and topological package build waves for GitHub Actions CI.
 
-Detects changed files under `packages/<name>/**` (or accepts explicit `--packages`),
-expands transitively to downstream static-linking dependents (`build_deps`), and
-groups them into parallel DAG waves.
+Detects:
+  - `build_toolchain`: true when any non-Markdown file under `toolchain/` or `scripts/oci.py` changed.
+  - `wave1..wave4`: changed packages under `packages/<name>/**` expanded transitively across
+    static-linking `build_deps`, grouped into parallel DAG waves.
 """
 
 from __future__ import annotations
@@ -40,9 +41,15 @@ def load_packages() -> dict[str, dict[str, object]]:
 
 def changed_files(base: str, head: str) -> list[str]:
     if not base or set(base) == {"0"}:
-        # Initial push / brand-new branch: build all packages.
-        return [f"packages/{p.parent.name}/pkg.toml" for p in PACKAGES_DIR.glob("*/pkg.toml")]
-    out = subprocess.check_output(["git", "diff", "--name-only", f"{base}...{head}"], cwd=REPO_ROOT, text=True)
+        # Initial push / brand-new branch: build toolchain and all packages.
+        files = ["toolchain/toolchain.toml"]
+        files.extend(f"packages/{p.parent.name}/pkg.toml" for p in PACKAGES_DIR.glob("*/pkg.toml"))
+        return files
+    out = subprocess.check_output(
+        ["git", "diff", "--name-only", f"{base}...{head}"],
+        cwd=REPO_ROOT,
+        text=True,
+    )
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
@@ -50,7 +57,6 @@ def compute_waves(all_pkgs: dict[str, dict[str, object]], seeds: set[str]) -> li
     if not seeds:
         return []
 
-    # Build reverse dependency graph (dep -> dependents)
     dependents: dict[str, set[str]] = defaultdict(set)
     for name, pkg in all_pkgs.items():
         for dep in pkg.get("build_deps", []):
@@ -58,7 +64,7 @@ def compute_waves(all_pkgs: dict[str, dict[str, object]], seeds: set[str]) -> li
                 raise SystemExit(f"Package '{name}' depends on unknown package '{dep}'")
             dependents[dep].add(name)
 
-    # Expand seeds transitively to downstream dependents (because libraries are statically linked)
+    # Expand seeds transitively to downstream dependents (static linking).
     selected: set[str] = set()
     q = deque(sorted(seeds))
     while q:
@@ -70,7 +76,6 @@ def compute_waves(all_pkgs: dict[str, dict[str, object]], seeds: set[str]) -> li
             if nxt not in selected:
                 q.append(nxt)
 
-    # Kahn's topological sort grouped by wave
     indeg: dict[str, int] = {}
     for name in selected:
         deps = [d for d in all_pkgs[name].get("build_deps", []) if d in selected]
@@ -98,18 +103,30 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="", help="Base git SHA for diff")
     parser.add_argument("--head", default="HEAD", help="Head git SHA for diff")
-    parser.add_argument("--packages", default="", help="Explicit comma-separated package names or 'all'")
+    parser.add_argument("--packages", default="", help="Explicit comma-separated package names, 'all', or ''")
+    parser.add_argument(
+        "--toolchain",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Whether to rebuild the toolchain ('auto' inspects git diff)",
+    )
     parser.add_argument("--github-output", type=pathlib.Path, default=None)
     args = parser.parse_args()
 
     all_pkgs = load_packages()
     seeds: set[str] = set()
+    build_toolchain = False
+
+    if args.toolchain == "true":
+        build_toolchain = True
+    elif args.toolchain == "false":
+        build_toolchain = False
 
     explicit = args.packages.strip()
     if explicit:
         if explicit.lower() == "all":
             seeds = set(all_pkgs.keys())
-        else:
+        elif explicit.lower() != "none":
             for item in explicit.split(","):
                 name = item.strip()
                 if not name:
@@ -117,20 +134,28 @@ def main() -> None:
                 if name not in all_pkgs:
                     raise SystemExit(f"Unknown package requested: '{name}'")
                 seeds.add(name)
-    else:
+    elif args.toolchain == "auto":
         files = changed_files(args.base, args.head)
+        rebuild_all_pkgs = False
         for f in files:
-            parts = pathlib.PurePosixPath(f).parts
-            if len(parts) >= 2 and parts[0] == "packages" and parts[1] in all_pkgs:
+            p = pathlib.PurePosixPath(f)
+            parts = p.parts
+            if p.suffix == ".md":
+                continue
+            if parts and parts[0] == "toolchain":
+                build_toolchain = True
+            elif len(parts) >= 2 and parts[0] == "packages" and parts[1] in all_pkgs:
                 seeds.add(parts[1])
-            elif parts and parts[0] == "scripts":
-                # Build infrastructure changed: rebuild everything to verify.
-                seeds = set(all_pkgs.keys())
-                break
+            elif f in ("scripts/build-pkg.py", "scripts/oci.py", "scripts/toml_loader.py"):
+                rebuild_all_pkgs = True
+        if rebuild_all_pkgs:
+            seeds = set(all_pkgs.keys())
 
     waves = compute_waves(all_pkgs, seeds)
     result = {
-        "has_changes": bool(waves),
+        "build_toolchain": build_toolchain,
+        "has_package_changes": bool(waves),
+        "has_changes": bool(build_toolchain or waves),
         "total_packages": sum(len(w) for w in waves),
         "waves": waves,
     }
@@ -141,7 +166,9 @@ def main() -> None:
     )
     if gh_out:
         with gh_out.open("a", encoding="utf-8") as f:
-            f.write(f"has_changes={'true' if waves else 'false'}\n")
+            f.write(f"build_toolchain={'true' if build_toolchain else 'false'}\n")
+            f.write(f"has_package_changes={'true' if waves else 'false'}\n")
+            f.write(f"has_changes={'true' if (build_toolchain or waves) else 'false'}\n")
             for idx in range(MAX_WAVES):
                 wave_list = waves[idx] if idx < len(waves) else []
                 f.write(f"wave{idx + 1}={json.dumps(wave_list)}\n")
