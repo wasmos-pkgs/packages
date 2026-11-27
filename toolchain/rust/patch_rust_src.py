@@ -50,8 +50,8 @@ def patch_libc_dir(libc_dir: pathlib.Path) -> None:
     patch_once(
         libc_dir / "build.rs",
         'target_arch == "wasm64"',
-        '    if target_arch == "loongarch64" || target_arch == "hexagon" || target_env == "ohos" {',
-        '    if target_arch == "loongarch64" || target_arch == "hexagon" || target_arch == "wasm64" || target_env == "ohos" {',
+        'target_arch == "loongarch64"',
+        'target_arch == "loongarch64" || target_arch == "wasm64"',
     )
 
 
@@ -71,18 +71,30 @@ def patch_library_dir(lib_dir: pathlib.Path) -> pathlib.Path:
         '    target_arch = "aarch64",\n    target_arch = "wasm64",',
     )
     # 3. unwind/src/lib.rs: panic=abort on wasm64 does not link libunwind.a
+    unwind_lib = lib_dir / "unwind/src/lib.rs"
     patch_once(
-        lib_dir / "unwind/src/lib.rs",
+        unwind_lib,
         'target_arch = "wasm64"',
         'target_os = "espidf",',
         'target_os = "espidf",\n        target_arch = "wasm64",',
     )
-    patch_once(
-        lib_dir / "unwind/src/lib.rs",
-        'not(target_arch = "wasm64")',
-        '#[cfg(target_env = "musl")]',
-        '#[cfg(all(target_env = "musl", not(target_arch = "wasm64")))]',
-    )
+    unwind_text = unwind_lib.read_text(encoding="utf-8")
+    if 'not(target_arch = "wasm64")' not in unwind_text:
+        if '#[cfg(all(target_env = "musl", not(target_abi = "pauthtest")))]' in unwind_text:
+            unwind_text = unwind_text.replace(
+                '#[cfg(all(target_env = "musl", not(target_abi = "pauthtest")))]',
+                '#[cfg(all(target_env = "musl", not(target_abi = "pauthtest"), not(target_arch = "wasm64")))]',
+                1,
+            )
+        elif '#[cfg(target_env = "musl")]' in unwind_text:
+            unwind_text = unwind_text.replace(
+                '#[cfg(target_env = "musl")]',
+                '#[cfg(all(target_env = "musl", not(target_arch = "wasm64")))]',
+                1,
+            )
+        else:
+            raise RuntimeError(f"Expected musl #[cfg] block not found in {unwind_lib}")
+        unwind_lib.write_text(unwind_text, encoding="utf-8")
     # 4. panic_unwind/src/lib.rs: route wasm64 to dummy.rs while panic=abort is active
     patch_once(
         lib_dir / "panic_unwind/src/lib.rs",
