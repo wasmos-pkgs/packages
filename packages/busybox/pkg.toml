@@ -10,7 +10,6 @@ build_deps = []
 runtime_deps = []
 
 [source]
-git = "https://git.busybox.net/busybox"
+git = "https://github.com/mirror/busybox.git"
 rev = "371fe9f71d445d18be28c82a2a6d82115c8af19d"
-# Fallback shallow tag/branch if commit fetch needs branch ref
 branch = "master"

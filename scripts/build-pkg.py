@@ -107,9 +107,12 @@ def verify_outputs(pkg: dict[str, object], destdir: pathlib.Path) -> list[str]:
         files.append(rel)
         if p.is_file() and not p.is_symlink() and os.access(p, os.X_OK):
             magic = p.read_bytes()[:4]
-            if magic != b"\x00asm":
-                raise SystemExit(f"Executable {rel} is not a Wasm binary (magic={magic!r})")
-            wasm_found = True
+            if magic == b"\x00asm":
+                wasm_found = True
+            elif magic.startswith(b"#!"):
+                pass
+            else:
+                raise SystemExit(f"Executable {rel} is not a Wasm binary or script (magic={magic!r})")
 
     if kind == "runtime" and not wasm_found:
         raise SystemExit(f"Runtime package '{pkg['name']}' produced no executable Wasm binaries")
