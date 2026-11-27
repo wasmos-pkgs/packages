@@ -1,0 +1,16 @@
+[package]
+name = "busybox"
+version = "1.37.0"
+rev = 0
+kind = "runtime"
+description = "BusyBox multi-call binary (ash shell + 120+ UNIX utilities) for wasm64-submilli-linux-musl"
+license = "GPL-2.0-only"
+homepage = "https://busybox.net/"
+build_deps = []
+runtime_deps = []
+
+[source]
+git = "https://git.busybox.net/busybox"
+rev = "371fe9f71d445d18be28c82a2a6d82115c8af19d"
+# Fallback shallow tag/branch if commit fetch needs branch ref
+branch = "master"

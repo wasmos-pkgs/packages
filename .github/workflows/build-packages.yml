@@ -1,0 +1,292 @@
+name: Build Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "scripts/**"
+      - ".github/workflows/build-packages.yml"
+  pull_request:
+    paths:
+      - "packages/**"
+      - "scripts/**"
+      - ".github/workflows/build-packages.yml"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Comma-separated package names, or 'all'"
+        type: string
+        default: "all"
+      publish:
+        description: "Push built packages and index to GHCR"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WASMOS_OCI_ORG: wasmos-pkgs
+  TOOLCHAIN_TAG: latest
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      wave1: ${{ steps.plan.outputs.wave1 }}
+      wave2: ${{ steps.plan.outputs.wave2 }}
+      wave3: ${{ steps.plan.outputs.wave3 }}
+      wave4: ${{ steps.plan.outputs.wave4 }}
+      should_push: ${{ steps.mode.outputs.should_push }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: mode
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "should_push=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.publish }}" == "true" ]]; then
+            echo "should_push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: plan
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            python3 scripts/plan-ci.py --packages "${{ inputs.packages }}"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            python3 scripts/plan-ci.py --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"
+          else
+            python3 scripts/plan-ci.py --base "${{ github.event.before }}" --head "${{ github.sha }}"
+          fi
+
+  wave1:
+    needs: plan
+    if: needs.plan.outputs.wave1 != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.plan.outputs.wave1) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3
+
+      - name: Pull cached toolchain from GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          python3 scripts/oci.py pull --repo wasmos-pkgs/toolchain --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
+
+      - name: Build ${{ matrix.package }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          PUSH_FLAG=""
+          if [[ "${{ needs.plan.outputs.should_push }}" == "true" ]]; then
+            PUSH_FLAG="--push"
+          fi
+          python3 scripts/build-pkg.py "${{ matrix.package }}" \
+            --toolchain /tmp/wasmos-toolchain \
+            --dist-dir dist \
+            $PUSH_FLAG
+
+      - name: Upload wave1 artifact for downstream waves
+        if: needs.plan.outputs.wave2 != '[]' && needs.plan.outputs.should_push != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wave1-${{ matrix.package }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  wave2:
+    needs: [plan, wave1]
+    if: always() && needs.plan.outputs.wave2 != '[]' && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.plan.outputs.wave2) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3
+
+      - name: Pull cached toolchain from GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          python3 scripts/oci.py pull --repo wasmos-pkgs/toolchain --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
+
+      - name: Download wave1 artifacts (PR dry-run)
+        if: needs.plan.outputs.should_push != 'true' && needs.wave1.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wave1-*
+          path: deps-dist
+          merge-multiple: true
+
+      - name: Build ${{ matrix.package }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          PUSH_FLAG=""
+          DEPS_FLAG=""
+          if [[ "${{ needs.plan.outputs.should_push }}" == "true" ]]; then
+            PUSH_FLAG="--push"
+          elif [[ -d deps-dist ]]; then
+            DEPS_FLAG="--deps-dir deps-dist"
+          fi
+          python3 scripts/build-pkg.py "${{ matrix.package }}" \
+            --toolchain /tmp/wasmos-toolchain \
+            --dist-dir dist \
+            $DEPS_FLAG \
+            $PUSH_FLAG
+
+      - name: Upload wave2 artifact for downstream waves
+        if: needs.plan.outputs.wave3 != '[]' && needs.plan.outputs.should_push != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wave2-${{ matrix.package }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  wave3:
+    needs: [plan, wave1, wave2]
+    if: always() && needs.plan.outputs.wave3 != '[]' && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') && (needs.wave2.result == 'success' || needs.wave2.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.plan.outputs.wave3) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3
+
+      - name: Pull cached toolchain from GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          python3 scripts/oci.py pull --repo wasmos-pkgs/toolchain --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
+
+      - name: Download prior wave artifacts (PR dry-run)
+        if: needs.plan.outputs.should_push != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wave*-*
+          path: deps-dist
+          merge-multiple: true
+
+      - name: Build ${{ matrix.package }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          PUSH_FLAG=""
+          DEPS_FLAG=""
+          if [[ "${{ needs.plan.outputs.should_push }}" == "true" ]]; then
+            PUSH_FLAG="--push"
+          elif [[ -d deps-dist ]]; then
+            DEPS_FLAG="--deps-dir deps-dist"
+          fi
+          python3 scripts/build-pkg.py "${{ matrix.package }}" \
+            --toolchain /tmp/wasmos-toolchain \
+            --dist-dir dist \
+            $DEPS_FLAG \
+            $PUSH_FLAG
+
+  wave4:
+    needs: [plan, wave1, wave2, wave3]
+    if: always() && needs.plan.outputs.wave4 != '[]' && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') && (needs.wave2.result == 'success' || needs.wave2.result == 'skipped') && (needs.wave3.result == 'success' || needs.wave3.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.plan.outputs.wave4) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3
+
+      - name: Pull cached toolchain from GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          python3 scripts/oci.py pull --repo wasmos-pkgs/toolchain --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
+
+      - name: Download prior wave artifacts (PR dry-run)
+        if: needs.plan.outputs.should_push != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wave*-*
+          path: deps-dist
+          merge-multiple: true
+
+      - name: Build ${{ matrix.package }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          PUSH_FLAG=""
+          DEPS_FLAG=""
+          if [[ "${{ needs.plan.outputs.should_push }}" == "true" ]]; then
+            PUSH_FLAG="--push"
+          elif [[ -d deps-dist ]]; then
+            DEPS_FLAG="--deps-dir deps-dist"
+          fi
+          python3 scripts/build-pkg.py "${{ matrix.package }}" \
+            --toolchain /tmp/wasmos-toolchain \
+            --dist-dir dist \
+            $DEPS_FLAG \
+            $PUSH_FLAG
+
+  publish-index:
+    needs: [plan, wave1, wave2, wave3, wave4]
+    if: |
+      always() &&
+      needs.plan.outputs.has_changes == 'true' &&
+      needs.plan.outputs.should_push == 'true' &&
+      (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') &&
+      (needs.wave2.result == 'success' || needs.wave2.result == 'skipped') &&
+      (needs.wave3.result == 'success' || needs.wave3.result == 'skipped') &&
+      (needs.wave4.result == 'success' || needs.wave4.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish package index to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          python3 scripts/oci.py publish-index --org "${{ env.WASMOS_OCI_ORG }}"

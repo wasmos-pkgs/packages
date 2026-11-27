@@ -1,0 +1,780 @@
+diff --git a/clang/lib/Basic/Targets.cpp b/clang/lib/Basic/Targets.cpp
+index 5d1157889..c091d9ae1 100644
+--- a/clang/lib/Basic/Targets.cpp
++++ b/clang/lib/Basic/Targets.cpp
+@@ -717,10 +717,14 @@ std::unique_ptr<TargetInfo> AllocateTarget(const llvm::Triple &Triple,
+     }
+   case llvm::Triple::wasm64:
+     if (Triple.getSubArch() != llvm::Triple::NoSubArch ||
+-        Triple.getVendor() != llvm::Triple::UnknownVendor ||
++        (Triple.getVendor() != llvm::Triple::UnknownVendor &&
++         Triple.getVendor() != llvm::Triple::Submilli) ||
+         !Triple.isOSBinFormatWasm())
+       return nullptr;
+     switch (os) {
++      case llvm::Triple::Linux:
++      return std::make_unique<SubmilliLinuxTargetInfo<WebAssembly64TargetInfo>>(
++          Triple, Opts);
+       case llvm::Triple::WASI:
+       return std::make_unique<WASITargetInfo<WebAssembly64TargetInfo>>(Triple,
+                                                                        Opts);
+diff --git a/clang/lib/Basic/Targets/OSTargets.h b/clang/lib/Basic/Targets/OSTargets.h
+index c1a68f464..d1ecfc483 100644
+--- a/clang/lib/Basic/Targets/OSTargets.h
++++ b/clang/lib/Basic/Targets/OSTargets.h
+@@ -983,6 +983,23 @@ public:
+   using WebAssemblyOSTargetInfo<Target>::WebAssemblyOSTargetInfo;
+ };
+ 
++// Submilli Linux WebAssembly target (wasm64-submilli-linux-musl)
++template <typename Target>
++class LLVM_LIBRARY_VISIBILITY SubmilliLinuxTargetInfo
++    : public WebAssemblyOSTargetInfo<Target> {
++  void getOSDefines(const LangOptions &Opts, const llvm::Triple &Triple,
++                    MacroBuilder &Builder) const final {
++    WebAssemblyOSTargetInfo<Target>::getOSDefines(Opts, Triple, Builder);
++    DefineStd(Builder, "unix", Opts);
++    DefineStd(Builder, "linux", Opts);
++    Builder.defineMacro("__gnu_linux__");
++    Builder.defineMacro("__submilli__");
++  }
++
++public:
++  using WebAssemblyOSTargetInfo<Target>::WebAssemblyOSTargetInfo;
++};
++
+ // Emscripten target
+ template <typename Target>
+ class LLVM_LIBRARY_VISIBILITY EmscriptenTargetInfo
+diff --git a/clang/lib/Basic/Targets/WebAssembly.cpp b/clang/lib/Basic/Targets/WebAssembly.cpp
+index af25d25a3..96c88d1bf 100644
+--- a/clang/lib/Basic/Targets/WebAssembly.cpp
++++ b/clang/lib/Basic/Targets/WebAssembly.cpp
+@@ -202,6 +202,12 @@ bool WebAssemblyTargetInfo::initFeatureMap(
+     addLime1Features();
+   } else if (CPU == "bleeding-edge") {
+     addBleedingEdgeFeatures();
++  } else if (CPU.empty() && getTriple().isOSLinux()) {
++    addGenericFeatures();
++    Features["exception-handling"] = true;
++    Features["extended-const"] = true;
++    Features["tail-call"] = true;
++    setSIMDLevel(Features, SIMD128, true);
+   }
+ 
+   return TargetInfo::initFeatureMap(Features, Diags, CPU, FeaturesVec);
+@@ -375,6 +381,8 @@ WebAssemblyTargetInfo::getTargetBuiltins() const {
+ void WebAssemblyTargetInfo::adjust(DiagnosticsEngine &Diags, LangOptions &Opts,
+                                    const TargetInfo *Aux) {
+   TargetInfo::adjust(Diags, Opts, Aux);
++  if (getTriple().isOSLinux())
++    return;
+   // Turn off POSIXThreads and ThreadModel so that we don't predefine _REENTRANT
+   // or __STDCPP_THREADS__ if we will eventually end up stripping atomics
+   // because they are unsupported.
+diff --git a/clang/lib/Basic/Targets/WebAssembly.h b/clang/lib/Basic/Targets/WebAssembly.h
+index 57b366cb9..fea06d60c 100644
+--- a/clang/lib/Basic/Targets/WebAssembly.h
++++ b/clang/lib/Basic/Targets/WebAssembly.h
+@@ -148,12 +148,16 @@ private:
+   bool hasInt128Type() const final { return true; }
+ 
+   IntType getIntTypeByWidth(unsigned BitWidth, bool IsSigned) const final {
++    if (BitWidth == 64 && getTriple().isOSLinux() && getTriple().isArch64Bit())
++      return IsSigned ? SignedLong : UnsignedLong;
+     // WebAssembly prefers long long for explicitly 64-bit integers.
+     return BitWidth == 64 ? (IsSigned ? SignedLongLong : UnsignedLongLong)
+                           : TargetInfo::getIntTypeByWidth(BitWidth, IsSigned);
+   }
+ 
+   IntType getLeastIntTypeByWidth(unsigned BitWidth, bool IsSigned) const final {
++    if (BitWidth == 64 && getTriple().isOSLinux() && getTriple().isArch64Bit())
++      return IsSigned ? SignedLong : UnsignedLong;
+     // WebAssembly uses long long for int_least64_t and int_fast64_t.
+     return BitWidth == 64
+                ? (IsSigned ? SignedLongLong : UnsignedLongLong)
+@@ -211,6 +215,13 @@ public:
+     SizeType = UnsignedLong;
+     PtrDiffType = SignedLong;
+     IntPtrType = SignedLong;
++    if (T.isOSLinux()) {
++      IntMaxType = SignedLong;
++      Int64Type = SignedLong;
++      SigAtomicType = SignedInt;
++      WCharType = UnsignedInt;
++      WIntType = UnsignedInt;
++    }
+     if (T.isOSEmscripten())
+       resetDataLayout(
+           "e-m:e-p:64:64-p10:8:8-p20:8:8-i64:64-i128:128-f128:64-n32:64-"
+diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
+index 55748c0bc..914637847 100644
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -6824,7 +6824,9 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
+       break;
+     case llvm::Triple::Linux:
+     case llvm::Triple::ELFIAMCU:
+-      if (Target.getArch() == llvm::Triple::hexagon)
++      if (Target.isWasm())
++        TC = std::make_unique<toolchains::WebAssembly>(*this, Target, Args);
++      else if (Target.getArch() == llvm::Triple::hexagon)
+         TC = std::make_unique<toolchains::HexagonToolChain>(*this, Target,
+                                                              Args);
+       else if ((Target.getVendor() == llvm::Triple::MipsTechnologies) &&
+diff --git a/clang/lib/Driver/ToolChains/WebAssembly.cpp b/clang/lib/Driver/ToolChains/WebAssembly.cpp
+index 5054868b5..b869e3ac0 100644
+--- a/clang/lib/Driver/ToolChains/WebAssembly.cpp
++++ b/clang/lib/Driver/ToolChains/WebAssembly.cpp
+@@ -68,6 +68,12 @@ static bool TargetBuildsComponents(const llvm::Triple &TargetTriple) {
+ }
+ 
+ static bool WantsPthread(const llvm::Triple &Triple, const ArgList &Args) {
++  if (Triple.isOSLinux()) {
++    Args.ClaimAllArgs(options::OPT_pthread);
++    Args.ClaimAllArgs(options::OPT_no_pthread);
++    return false;
++  }
++
+   bool WantsPthread =
+       Args.hasFlag(options::OPT_pthread, options::OPT_no_pthread, false);
+ 
+@@ -98,6 +104,11 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   if (Args.hasArg(options::OPT_s))
+     CmdArgs.push_back("--strip-all");
+ 
++  if (ToolChain.getTriple().isOSLinux() && !Args.hasArg(options::OPT_r)) {
++    CmdArgs.push_back("--submilli");
++    CmdArgs.push_back("--keep-section=submilli.target");
++  }
++
+   // On `wasip2` the default linker is `wasm-component-ld` which wraps the
+   // execution of `wasm-ld`. Find `wasm-ld` and pass it as an argument of where
+   // to find it to avoid it needing to hunt and rediscover or search `PATH` for
+@@ -180,9 +191,11 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   CmdArgs.push_back(Output.getFilename());
+ 
+   // Don't use wasm-opt by default on `wasip2` as it doesn't have support for
+-  // components at this time. Retain the historical default otherwise, though,
+-  // of running `wasm-opt` by default.
+-  bool WasmOptDefault = !TargetBuildsComponents(ToolChain.getTriple());
++  // components at this time, nor on Linux/submilli where post-link fork
++  // instrumentation runs on the linked module. Retain the historical default
++  // otherwise, though, of running `wasm-opt` by default.
++  bool WasmOptDefault = !TargetBuildsComponents(ToolChain.getTriple()) &&
++                        !ToolChain.getTriple().isOSLinux();
+   bool RunWasmOpt = Args.hasFlag(options::OPT_wasm_opt,
+                                  options::OPT_no_wasm_opt, WasmOptDefault);
+ 
+@@ -228,6 +241,21 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+       }
+     }
+   }
++
++  if (ToolChain.getTriple().isOSLinux() && !Args.hasArg(options::OPT_r) &&
++      !Args.hasArg(options::OPT_shared)) {
++    std::string PostLinkPath = ToolChain.GetProgramPath("wasmos-postlink");
++    if (PostLinkPath != "wasmos-postlink") {
++      const char *PostLink = Args.MakeArgString(PostLinkPath);
++      ArgStringList PostArgs;
++      PostArgs.push_back(Output.getFilename());
++      PostArgs.push_back("-o");
++      PostArgs.push_back(Output.getFilename());
++      C.addCommand(std::make_unique<Command>(
++          JA, *this, ResponseFileSupport::AtFileCurCP(), PostLink, PostArgs,
++          Inputs, Output));
++    }
++  }
+ }
+ 
+ /// Given a base library directory, append path components to form the
+@@ -264,6 +292,8 @@ WebAssembly::WebAssembly(const Driver &D, const llvm::Triple &Triple,
+       getFilePaths().push_back(Dir);
+     }
+     getFilePaths().push_back(SysRoot + "/lib/" + MultiarchTriple);
++    if (getTriple().isOSLinux())
++      getFilePaths().push_back(SysRoot + "/lib");
+   }
+ }
+ 
+@@ -449,6 +479,46 @@ void WebAssembly::addClangTargetOptions(const ArgList &DriverArgs,
+       }
+     }
+   }
++
++  if (getTriple().isOSLinux() &&
++      !DriverArgs.hasFlag(options::OPT_mno_exception_handing,
++                          options::OPT_mexception_handing, false)) {
++    bool HasExplicitEhMode = false;
++    bool HasWasmEnableEH =
++        DriverArgs.getLastArg(options::OPT_fwasm_exceptions) != nullptr;
++    bool HasWasmEnableSjLj = false;
++    bool HasWasmLegacyEH = false;
++    for (const Arg *A : DriverArgs.filtered(options::OPT_mllvm)) {
++      StringRef Opt = A->getValue(0);
++      if (Opt.starts_with("-enable-emscripten-"))
++        HasExplicitEhMode = true;
++      if (Opt.starts_with("-wasm-enable-eh"))
++        HasWasmEnableEH = true;
++      if (Opt.starts_with("-wasm-enable-sjlj"))
++        HasWasmEnableSjLj = true;
++      if (Opt.starts_with("-wasm-use-legacy-eh"))
++        HasWasmLegacyEH = true;
++    }
++    if (!HasExplicitEhMode &&
++        !DriverArgs.hasFlag(options::OPT_mno_multivalue,
++                            options::OPT_mmultivalue, false) &&
++        !DriverArgs.hasFlag(options::OPT_mno_reference_types,
++                            options::OPT_mreference_types, false)) {
++      EnableFeaturesForWasmEHSjLj();
++      if (!HasWasmEnableEH) {
++        CC1Args.push_back("-mllvm");
++        CC1Args.push_back("-wasm-enable-eh");
++      }
++      if (!HasWasmEnableSjLj) {
++        CC1Args.push_back("-mllvm");
++        CC1Args.push_back("-wasm-enable-sjlj");
++      }
++      if (!HasWasmLegacyEH) {
++        CC1Args.push_back("-mllvm");
++        CC1Args.push_back("-wasm-use-legacy-eh=false");
++      }
++    }
++  }
+ }
+ 
+ ToolChain::RuntimeLibType WebAssembly::GetDefaultRuntimeLibType() const {
+diff --git a/compiler-rt/lib/builtins/fp_compare_impl.inc b/compiler-rt/lib/builtins/fp_compare_impl.inc
+index f883338c4..fa1629fc1 100644
+--- a/compiler-rt/lib/builtins/fp_compare_impl.inc
++++ b/compiler-rt/lib/builtins/fp_compare_impl.inc
+@@ -12,7 +12,7 @@
+ // functions. We need to ensure that the return value is sign-extended in the
+ // same way as GCC expects (since otherwise GCC-generated __builtin_isinf
+ // returns true for finite 128-bit floating-point numbers).
+-#if defined(__aarch64__) || defined(__arm64ec__)
++#if defined(__aarch64__) || defined(__arm64ec__) || defined(__wasm__)
+ // AArch64 GCC overrides libgcc_cmp_return to use int instead of long.
+ typedef int CMP_RESULT;
+ #elif __SIZEOF_POINTER__ == 8 && __SIZEOF_LONG__ == 4
+diff --git a/lld/wasm/Config.h b/lld/wasm/Config.h
+index 9d903e0c7..50713e3b5 100644
+--- a/lld/wasm/Config.h
++++ b/lld/wasm/Config.h
+@@ -67,6 +67,8 @@ struct Config {
+   std::optional<std::pair<llvm::StringRef, llvm::StringRef>> memoryImport;
+   std::optional<llvm::StringRef> memoryExport;
+   bool sharedMemory;
++  bool submilli = false;
++  bool hasPassiveTLS() const { return sharedMemory || submilli; }
+   bool importTable;
+   bool importUndefined;
+   std::optional<bool> is64;
+diff --git a/lld/wasm/Driver.cpp b/lld/wasm/Driver.cpp
+index 1c5d21c06..a1d218065 100644
+--- a/lld/wasm/Driver.cpp
++++ b/lld/wasm/Driver.cpp
+@@ -560,6 +560,7 @@ static void readConfigs(opt::InputArgList &args) {
+   }
+ 
+   ctx.arg.sharedMemory = args.hasArg(OPT_shared_memory);
++  ctx.arg.submilli = args.hasArg(OPT_submilli);
+   ctx.arg.soName = args.getLastArgValue(OPT_soname);
+   ctx.arg.importTable = args.hasArg(OPT_import_table);
+   ctx.arg.importUndefined = args.hasArg(OPT_import_undefined);
+@@ -638,8 +639,10 @@ static void readConfigs(opt::InputArgList &args) {
+   ctx.arg.initialMemory = args::getInteger(args, OPT_initial_memory, 0);
+   ctx.arg.maxMemory = args::getInteger(args, OPT_max_memory, 0);
+   ctx.arg.noGrowableMemory = args.hasArg(OPT_no_growable_memory);
++  uint64_t defaultStackSize =
++      ctx.arg.submilli ? (16 * WasmDefaultPageSize) : WasmDefaultPageSize;
+   ctx.arg.zStackSize =
+-      args::getZOptionValue(args, OPT_z, "stack-size", WasmDefaultPageSize);
++      args::getZOptionValue(args, OPT_z, "stack-size", defaultStackSize);
+   ctx.arg.pageSize = args::getInteger(args, OPT_page_size, WasmDefaultPageSize);
+   if (ctx.arg.pageSize != 1 && ctx.arg.pageSize != WasmDefaultPageSize)
+     error("--page_size=N must be either 1 or 65536");
+@@ -714,6 +717,9 @@ static void readConfigs(opt::InputArgList &args) {
+ // This function initialize such members. See Config.h for the details
+ // of these values.
+ static void setConfigs() {
++  if (ctx.arg.relocatable)
++    ctx.arg.submilli = false;
++
+   ctx.isPic = ctx.arg.pie || ctx.arg.shared;
+ 
+   if (ctx.isPic) {
+@@ -722,15 +728,16 @@ static void setConfigs() {
+     ctx.arg.importTable = true;
+   } else {
+     // Default table base.  Defaults to 1, reserving 0 for the NULL function
+-    // pointer.
++    // pointer (or 2 on submilli, reserving 1 for SIG_IGN).
+     if (!ctx.arg.tableBase)
+-      ctx.arg.tableBase = 1;
++      ctx.arg.tableBase = ctx.arg.submilli ? 2 : 1;
+     // The default offset for static/global data, for when --global-base is
+     // not specified on the command line.  The precise value of 1024 is
+     // somewhat arbitrary, and pre-dates wasm-ld (Its the value that
+-    // emscripten used prior to wasm-ld).
++    // emscripten used prior to wasm-ld). On submilli, reserve page 0 (64 KiB)
++    // as a null-pointer guard region.
+     if (!ctx.arg.globalBase && !ctx.arg.relocatable && !ctx.arg.stackFirst)
+-      ctx.arg.globalBase = 1024;
++      ctx.arg.globalBase = ctx.arg.submilli ? 65536 : 1024;
+   }
+ 
+   if (ctx.arg.relocatable) {
+@@ -752,6 +759,21 @@ static void setConfigs() {
+     }
+   }
+ 
++  if (ctx.arg.submilli && !ctx.arg.shared &&
++      !ctx.arg.memoryExport.has_value() && !ctx.arg.memoryImport.has_value()) {
++    ctx.arg.memoryImport =
++        std::pair<llvm::StringRef, llvm::StringRef>("submilli", memoryName);
++  }
++
++  if (ctx.arg.submilli && !ctx.arg.shared) {
++    ctx.arg.exportedSymbols.insert("__stack_pointer");
++    ctx.arg.exportedSymbols.insert("__tls_base");
++    ctx.arg.exportedSymbols.insert("__wasm_init_tls");
++    ctx.arg.exportedSymbols.insert("__submilli_thread_start");
++    ctx.arg.exportedSymbols.insert("__submilli_signal_deliver");
++    ctx.arg.exportedSymbols.insert("__submilli_kernel_block");
++  }
++
+   // If neither export-memory nor import-memory is specified, default to
+   // exporting memory under its default name.
+   if (!ctx.arg.memoryExport.has_value() && !ctx.arg.memoryImport.has_value()) {
+@@ -968,7 +990,7 @@ static void createSyntheticSymbols() {
+     ctx.sym.stackPointer->markLive();
+   }
+ 
+-  if (ctx.arg.sharedMemory) {
++  if (ctx.arg.hasPassiveTLS()) {
+     ctx.sym.tlsBase = createGlobalVariable("__tls_base", true);
+     ctx.sym.tlsSize = createGlobalVariable("__tls_size", false);
+     ctx.sym.tlsAlign = createGlobalVariable("__tls_align", false);
+@@ -1011,7 +1033,7 @@ static void createOptionalSymbols() {
+   //
+   // __tls_size and __tls_align are not needed in this case since they are only
+   // needed for __wasm_init_tls (which we do not create in this case).
+-  if (!ctx.arg.sharedMemory)
++  if (!ctx.arg.hasPassiveTLS())
+     ctx.sym.tlsBase = createOptionalGlobal("__tls_base", false);
+ }
+ 
+@@ -1254,7 +1276,11 @@ static void splitSections() {
+ 
+ static bool isKnownZFlag(StringRef s) {
+   // For now, we only support a very limited set of -z flags
+-  return s.starts_with("stack-size=") || s.starts_with("muldefs");
++  return s.starts_with("stack-size=") || s.starts_with("muldefs") ||
++         s == "noexecstack" || s == "execstack" || s == "relro" ||
++         s == "norelro" || s == "now" || s == "lazy" || s == "defs" ||
++         s == "nodefs" || s.starts_with("max-page-size=") ||
++         s.starts_with("common-page-size=");
+ }
+ 
+ // Report a warning for an unknown -z option.
+diff --git a/lld/wasm/Options.td b/lld/wasm/Options.td
+index 2f699e2f6..acd19a308 100644
+--- a/lld/wasm/Options.td
++++ b/lld/wasm/Options.td
+@@ -224,6 +224,28 @@ def export_memory_with_name: JJ<"export-memory=">,
+ def shared_memory: FF<"shared-memory">,
+   HelpText<"Use shared linear memory">;
+ 
++def submilli: FF<"submilli">,
++  HelpText<"Link for wasm64-submilli-linux-musl ABI (imported memory64, passive TLS, submilli.target)">;
++
++// GNU ld compatibility options accepted as no-ops for Linux userland build systems
++defm as_needed: B<"as-needed",
++    "Only set DT_NEEDED for shared libraries if used (ignored)",
++    "Always set DT_NEEDED for shared libraries (ignored)">;
++def start_group: F<"start-group">, HelpText<"Ignored for GNU ld compatibility">;
++def start_group_paren: Flag<["-"], "(">, Alias<start_group>;
++def end_group: F<"end-group">, HelpText<"Ignored for GNU ld compatibility">;
++def end_group_paren: Flag<["-"], ")">, Alias<end_group>;
++def eh_frame_hdr: F<"eh-frame-hdr">, HelpText<"Ignored for GNU ld compatibility">;
++def no_eh_frame_hdr: F<"no-eh-frame-hdr">, HelpText<"Ignored for GNU ld compatibility">;
++def sort_common: F<"sort-common">, HelpText<"Ignored for GNU ld compatibility">;
++def sort_common_eq: J<"sort-common=">, HelpText<"Ignored for GNU ld compatibility">;
++def warn_common: F<"warn-common">, HelpText<"Ignored for GNU ld compatibility">;
++def no_warn_common: F<"no-warn-common">, HelpText<"Ignored for GNU ld compatibility">;
++defm sort_section: Eq<"sort-section", "Ignored for GNU ld compatibility">;
++defm hash_style: Eq<"hash-style", "Ignored for GNU ld compatibility">;
++defm dynamic_linker: Eq<"dynamic-linker", "Ignored for GNU ld compatibility">;
++defm version_script: Eq<"version-script", "Ignored for GNU ld compatibility">;
++
+ defm soname: Eq<"soname", "Set the module name in the generated name section">;
+ 
+ def import_table: FF<"import-table">,
+diff --git a/lld/wasm/OutputSections.cpp b/lld/wasm/OutputSections.cpp
+index 8ccd38f78..9f6cc801d 100644
+--- a/lld/wasm/OutputSections.cpp
++++ b/lld/wasm/OutputSections.cpp
+@@ -105,7 +105,7 @@ void DataSection::finalizeContents() {
+   });
+ #endif
+ 
+-  assert((ctx.arg.sharedMemory || !ctx.isPic || ctx.arg.extendedConst ||
++  assert((ctx.arg.hasPassiveTLS() || !ctx.isPic || ctx.arg.extendedConst ||
+           activeCount <= 1) &&
+          "output segments should have been combined by now");
+ 
+diff --git a/lld/wasm/Relocations.cpp b/lld/wasm/Relocations.cpp
+index 52888ad25..a174eb9a4 100644
+--- a/lld/wasm/Relocations.cpp
++++ b/lld/wasm/Relocations.cpp
+@@ -125,7 +125,7 @@ void scanRelocations(InputChunk *chunk) {
+       // In single-threaded builds TLS is lowered away and TLS data can be
+       // merged with normal data and allowing TLS relocation in non-TLS
+       // segments.
+-      if (ctx.arg.sharedMemory) {
++      if (ctx.arg.hasPassiveTLS()) {
+         if (!sym->isTLS()) {
+           error(toString(file) + ": relocation " +
+                 relocTypeToString(reloc.Type) +
+diff --git a/lld/wasm/SyntheticSections.cpp b/lld/wasm/SyntheticSections.cpp
+index e1192706e..627c7ec34 100644
+--- a/lld/wasm/SyntheticSections.cpp
++++ b/lld/wasm/SyntheticSections.cpp
+@@ -494,7 +494,7 @@ void GlobalSection::writeBody() {
+         mutable_ = true;
+       // With multi-theadeding any TLS globals must be mutable since they get
+       // set during `__wasm_apply_global_tls_relocs`
+-      if (ctx.arg.sharedMemory && sym->isTLS())
++      if (ctx.arg.hasPassiveTLS() && sym->isTLS())
+         mutable_ = true;
+     }
+     WasmGlobalType type{itype, mutable_};
+@@ -531,10 +531,11 @@ void GlobalSection::writeBody() {
+     } else {
+       WasmInitExpr initExpr;
+       if (auto *d = dyn_cast<DefinedData>(sym))
+-        // In the sharedMemory case TLS globals are set during
+-        // `__wasm_apply_global_tls_relocs`, but in the non-shared case
++        // In the sharedMemory/submilli case TLS globals are set during
++        // `__wasm_apply_global_tls_relocs`, but in the non-passive case
+         // we know the absolute value at link time.
+-        initExpr = intConst(d->getVA(/*absolute=*/!ctx.arg.sharedMemory), is64);
++        initExpr =
++            intConst(d->getVA(/*absolute=*/!ctx.arg.hasPassiveTLS()), is64);
+       else if (auto *f = dyn_cast<FunctionSymbol>(sym))
+         initExpr = intConst(f->isStub ? 0 : f->getTableIndex(), is64);
+       else {
+@@ -635,7 +636,14 @@ void DataCountSection::writeBody() {
+ }
+ 
+ bool DataCountSection::isNeeded() const {
+-  return numSegments && ctx.arg.sharedMemory;
++  return numSegments && ctx.arg.hasPassiveTLS();
++}
++
++void SubmilliTargetSection::writeBody() {
++  static constexpr uint8_t targetHeader[16] = {
++      's', 'm', 'l', 'i', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++  bodyOutputStream.write(reinterpret_cast<const char *>(targetHeader),
++                         sizeof(targetHeader));
+ }
+ 
+ void LinkingSection::writeBody() {
+diff --git a/lld/wasm/SyntheticSections.h b/lld/wasm/SyntheticSections.h
+index 068fbed11..dfdfa8c65 100644
+--- a/lld/wasm/SyntheticSections.h
++++ b/lld/wasm/SyntheticSections.h
+@@ -467,6 +467,16 @@ private:
+   uint8_t *hashPlaceholderPtr = nullptr;
+ };
+ 
++class SubmilliTargetSection : public SyntheticSection {
++public:
++  SubmilliTargetSection()
++      : SyntheticSection(llvm::wasm::WASM_SEC_CUSTOM, "submilli.target") {}
++  bool isNeeded() const override {
++    return ctx.arg.submilli && !ctx.arg.relocatable && !ctx.arg.shared;
++  }
++  void writeBody() override;
++};
++
+ // Linker generated output sections
+ struct OutStruct {
+   DylinkSection *dylinkSec;
+@@ -485,6 +495,7 @@ struct OutStruct {
+   NameSection *nameSec;
+   ProducersSection *producersSec;
+   TargetFeaturesSection *targetFeaturesSec;
++  SubmilliTargetSection *submilliTargetSec;
+   BuildIdSection *buildIdSec;
+ };
+ 
+diff --git a/lld/wasm/Writer.cpp b/lld/wasm/Writer.cpp
+index b704677d3..cd380fd44 100644
+--- a/lld/wasm/Writer.cpp
++++ b/lld/wasm/Writer.cpp
+@@ -142,7 +142,8 @@ void Writer::calculateCustomSections() {
+       // These custom sections are known the linker and synthesized rather than
+       // blindly copied.
+       if (name == "linking" || name == "name" || name == "producers" ||
+-          name == "target_features" || name.starts_with("reloc."))
++          name == "target_features" || name == "submilli.target" ||
++          name.starts_with("reloc."))
+         continue;
+       // These custom sections are generated by `clang -fembed-bitcode`.
+       // These are used by the rust toolchain to ship LTO data along with
+@@ -395,7 +396,7 @@ void Writer::layoutMemory() {
+         auto *tlsAlign = cast<DefinedGlobal>(ctx.sym.tlsAlign);
+         setGlobalPtr(tlsAlign, int64_t{1} << seg->alignment);
+       }
+-      if (!ctx.arg.sharedMemory && ctx.sym.tlsBase) {
++      if (!ctx.arg.hasPassiveTLS() && ctx.sym.tlsBase) {
+         auto *tlsBase = cast<DefinedGlobal>(ctx.sym.tlsBase);
+         setGlobalPtr(tlsBase, memoryPtr);
+       }
+@@ -405,7 +406,7 @@ void Writer::layoutMemory() {
+   }
+ 
+   // Make space for the memory initialization flag
+-  if (ctx.arg.sharedMemory && hasPassiveInitializedSegments()) {
++  if (ctx.arg.hasPassiveTLS() && hasPassiveInitializedSegments()) {
+     memoryPtr = alignTo(memoryPtr, 4);
+     ctx.sym.initMemoryFlag = symtab->addSyntheticDataSymbol(
+         "__wasm_init_memory_flag", WASM_SYMBOL_VISIBILITY_HIDDEN);
+@@ -557,6 +558,7 @@ void Writer::addSections() {
+   addSection(out.nameSec);
+   addSection(out.producersSec);
+   addSection(out.targetFeaturesSec);
++  addSection(out.submilliTargetSec);
+   addSection(out.buildIdSec);
+ }
+ 
+@@ -580,6 +582,10 @@ void Writer::populateTargetFeatures() {
+     // TODO (https://github.com/llvm/llvm-project/issues/51681)
+     allowed.insert("mutable-globals");
+   }
++  if (ctx.arg.submilli) {
++    allowed.insert("mutable-globals");
++    allowed.insert("bulk-memory");
++  }
+ 
+   if (ctx.arg.extraFeatures.has_value()) {
+     auto &extraFeatures = *ctx.arg.extraFeatures;
+@@ -640,10 +646,10 @@ void Writer::populateTargetFeatures() {
+   }
+ 
+   if (tlsUsed) {
+-    for (auto feature : {"atomics", "bulk-memory"})
+-      if (!allowed.count(feature))
+-        error(StringRef("'") + feature +
+-              "' feature must be used in order to use thread-local storage");
++    if (!ctx.arg.submilli && !allowed.count("atomics"))
++      error("'atomics' feature must be used in order to use thread-local storage");
++    if (!allowed.count("bulk-memory"))
++      error("'bulk-memory' feature must be used in order to use thread-local storage");
+   }
+ 
+   // Validate that used features are allowed in output
+@@ -1015,7 +1021,7 @@ static StringRef getOutputDataSegmentName(const InputChunk &seg) {
+ OutputSegment *Writer::createOutputSegment(StringRef name) {
+   LLVM_DEBUG(dbgs() << "new segment: " << name << "\n");
+   OutputSegment *s = make<OutputSegment>(name);
+-  if (ctx.arg.sharedMemory)
++  if (ctx.arg.hasPassiveTLS())
+     s->initFlags = WASM_DATA_SEGMENT_IS_PASSIVE;
+   if (!ctx.arg.relocatable && name.starts_with(".bss"))
+     s->isBss = true;
+@@ -1074,7 +1080,7 @@ void Writer::combineOutputSegments() {
+   // This restriction does not apply when the extended const extension is
+   // available: https://github.com/WebAssembly/extended-const
+   assert(!ctx.arg.extendedConst);
+-  assert(ctx.isPic && !ctx.arg.sharedMemory);
++  assert(ctx.isPic && !ctx.arg.hasPassiveTLS());
+   if (segments.size() <= 1)
+     return;
+   OutputSegment *combined = make<OutputSegment>(".data");
+@@ -1149,14 +1155,14 @@ void Writer::createSyntheticInitFunctions() {
+         "__wasm_init_memory", WASM_SYMBOL_VISIBILITY_HIDDEN,
+         make<SyntheticFunction>(nullSignature, "__wasm_init_memory"));
+     ctx.sym.initMemory->markLive();
+-    if (ctx.arg.sharedMemory) {
+-      // This global is assigned during  __wasm_init_memory in the shared memory
++    if (ctx.arg.hasPassiveTLS()) {
++      // This global is assigned during  __wasm_init_memory in the passive TLS
+       // case.
+       ctx.sym.tlsBase->markLive();
+     }
+   }
+ 
+-  if (ctx.arg.sharedMemory) {
++  if (ctx.arg.hasPassiveTLS()) {
+     if (out.globalSec->needsTLSRelocations()) {
+       ctx.sym.applyGlobalTLSRelocs = symtab->addSyntheticFunction(
+           "__wasm_apply_global_tls_relocs", WASM_SYMBOL_VISIBILITY_HIDDEN,
+@@ -1205,7 +1211,7 @@ void Writer::createInitMemoryFunction() {
+   assert(ctx.sym.initMemory);
+   assert(hasPassiveInitializedSegments());
+   uint64_t flagAddress;
+-  if (ctx.arg.sharedMemory) {
++  if (ctx.arg.hasPassiveTLS()) {
+     assert(ctx.sym.initMemoryFlag);
+     flagAddress = ctx.sym.initMemoryFlag->getVA();
+   }
+@@ -1314,6 +1320,36 @@ void Writer::createInitMemoryFunction() {
+ 
+       // Initialize passive data segments
+       writeU8(os, WASM_OPCODE_END, "end $init");
++    } else if (ctx.arg.submilli) {
++      if (ctx.isPic) {
++        writeUleb128(os, 1, "num local decls");
++        writeUleb128(os, 2, "local count");
++        writeU8(os, is64 ? WASM_TYPE_I64 : WASM_TYPE_I32, "address type");
++        writeU8(os, WASM_OPCODE_GLOBAL_GET, "GLOBAL_GET");
++        writeUleb128(os, ctx.sym.memoryBase->getGlobalIndex(), "memory_base");
++        writePtrConst(os, flagAddress, is64, "flag address");
++        writeU8(os, is64 ? WASM_OPCODE_I64_ADD : WASM_OPCODE_I32_ADD, "add");
++        writeU8(os, WASM_OPCODE_LOCAL_SET, "local.set");
++        writeUleb128(os, 0, "local 0");
++      } else {
++        writeUleb128(os, 0, "num locals");
++      }
++
++      // Skip passive segment initialization if linear memory was already
++      // initialized (e.g. forked child process or secondary pthread instance).
++      constexpr unsigned kOpcodeBrIf = 0x0d;
++      constexpr unsigned kOpcodeI32Load = 0x28;
++      writeU8(os, WASM_OPCODE_BLOCK, "block $drop");
++      writeU8(os, WASM_TYPE_NORESULT, "block type");
++      writeGetFlagAddress();
++      writeU8(os, kOpcodeI32Load, "i32.load");
++      writeMemArg(os, 2, 0);
++      writeU8(os, kOpcodeBrIf, "br_if $drop");
++      writeUleb128(os, 0, "label $drop");
++      writeGetFlagAddress();
++      writeI32Const(os, 1, "initialized flag value");
++      writeU8(os, WASM_OPCODE_I32_STORE, "i32.store");
++      writeMemArg(os, 2, 0);
+     } else {
+       writeUleb128(os, 0, "num local decls");
+     }
+@@ -1336,7 +1372,7 @@ void Writer::createInitMemoryFunction() {
+         // When we initialize the TLS segment we also set the `__tls_base`
+         // global.  This allows the runtime to use this static copy of the
+         // TLS data for the first/main thread.
+-        if (ctx.arg.sharedMemory && s->isTLS()) {
++        if (ctx.arg.hasPassiveTLS() && s->isTLS()) {
+           if (ctx.isPic) {
+             // Cache the result of the addionion in local 0
+             writeU8(os, WASM_OPCODE_LOCAL_TEE, "local.tee");
+@@ -1402,13 +1438,15 @@ void Writer::createInitMemoryFunction() {
+ 
+       // Unconditionally drop passive data segments
+       writeU8(os, WASM_OPCODE_END, "end $drop");
++    } else if (ctx.arg.submilli) {
++      writeU8(os, WASM_OPCODE_END, "end $drop");
+     }
+ 
+     for (const OutputSegment *s : segments) {
+       if (needsPassiveInitialization(s) && !s->isBss) {
+         // The TLS region should not be dropped since its is needed
+         // during the initialization of each thread (__wasm_init_tls).
+-        if (ctx.arg.sharedMemory && s->isTLS())
++        if (ctx.arg.hasPassiveTLS() && s->isTLS())
+           continue;
+         // data.drop instruction
+         writeU8(os, WASM_OPCODE_MISC_PREFIX, "bulk-memory prefix");
+@@ -1461,7 +1499,7 @@ void Writer::createApplyDataRelocationsFunction() {
+     writeUleb128(os, 0, "num locals");
+     bool generated = false;
+     for (const OutputSegment *seg : segments)
+-      if (!ctx.arg.sharedMemory || !seg->isTLS())
++      if (!ctx.arg.hasPassiveTLS() || !seg->isTLS())
+         for (const InputChunk *inSeg : seg->inputSegments)
+           generated |= inSeg->generateRelocationCode(os);
+ 
+@@ -1695,6 +1733,7 @@ void Writer::createSyntheticSections() {
+   out.elemSec = make<ElemSection>();
+   out.producersSec = make<ProducersSection>();
+   out.targetFeaturesSec = make<TargetFeaturesSection>();
++  out.submilliTargetSec = make<SubmilliTargetSection>();
+   out.buildIdSec = make<BuildIdSection>();
+ }
+ 
+@@ -1750,7 +1789,7 @@ void Writer::run() {
+   // `__memory_base` import.  Unless we support the extended const expression we
+   // can't do addition inside the constant expression, so we much combine the
+   // segments into a single one that can live at `__memory_base`.
+-  if (ctx.isPic && !ctx.arg.extendedConst && !ctx.arg.sharedMemory) {
++  if (ctx.isPic && !ctx.arg.extendedConst && !ctx.arg.hasPassiveTLS()) {
+     // In shared memory mode all data segments are passive and initialized
+     // via __wasm_init_memory.
+     log("-- combineOutputSegments");
+@@ -1797,7 +1836,7 @@ void Writer::run() {
+     // If the input contains a call to `__wasm_call_ctors`, either in one of
+     // the input objects or an explicit export from the command-line, we
+     // assume ctors and dtors are taken care of already.
+-    if (!ctx.arg.relocatable && !ctx.isPic &&
++    if (!ctx.arg.relocatable && !ctx.isPic && !ctx.arg.submilli &&
+         !ctx.sym.callCtors->isUsedInRegularObj &&
+         !ctx.sym.callCtors->isExported()) {
+       log("-- createCommandExportWrappers");
+diff --git a/llvm/include/llvm/TargetParser/Triple.h b/llvm/include/llvm/TargetParser/Triple.h
+index 657f42303..e16282529 100644
+--- a/llvm/include/llvm/TargetParser/Triple.h
++++ b/llvm/include/llvm/TargetParser/Triple.h
+@@ -197,7 +197,8 @@ public:
+     SUSE,
+     OpenEmbedded,
+     Intel,
+-    LastVendorType = Intel
++    Submilli,
++    LastVendorType = Submilli
+   };
+   enum OSType {
+     UnknownOS,
+diff --git a/llvm/lib/Target/WebAssembly/WebAssemblyTargetMachine.cpp b/llvm/lib/Target/WebAssembly/WebAssemblyTargetMachine.cpp
+index 6827ee652..36932530a 100644
+--- a/llvm/lib/Target/WebAssembly/WebAssemblyTargetMachine.cpp
++++ b/llvm/lib/Target/WebAssembly/WebAssemblyTargetMachine.cpp
+@@ -293,15 +293,18 @@ public:
+ 
+     bool StrippedAtomics = false;
+     bool StrippedTLS = false;
++    bool KeepUnsharedTLS = WasmTM->getTargetTriple().isOSLinux() &&
++                           Features[WebAssembly::FeatureBulkMemory];
+ 
+     if (!Features[WebAssembly::FeatureAtomics]) {
+       StrippedAtomics = stripAtomics(M);
+-      StrippedTLS = stripThreadLocals(M);
++      if (!KeepUnsharedTLS)
++        StrippedTLS = stripThreadLocals(M);
+     } else if (!Features[WebAssembly::FeatureBulkMemory]) {
+       StrippedTLS |= stripThreadLocals(M);
+     }
+ 
+-    if (StrippedAtomics && !StrippedTLS)
++    if (StrippedAtomics && !StrippedTLS && !KeepUnsharedTLS)
+       stripThreadLocals(M);
+     else if (StrippedTLS && !StrippedAtomics)
+       stripAtomics(M);
+diff --git a/llvm/lib/TargetParser/Triple.cpp b/llvm/lib/TargetParser/Triple.cpp
+index 0584c941d..371407139 100644
+--- a/llvm/lib/TargetParser/Triple.cpp
++++ b/llvm/lib/TargetParser/Triple.cpp
+@@ -271,6 +271,7 @@ StringRef Triple::getVendorTypeName(VendorType Kind) {
+   case PC: return "pc";
+   case SCEI: return "scei";
+   case SUSE: return "suse";
++  case Submilli: return "submilli";
+   }
+ 
+   llvm_unreachable("Invalid VendorType!");
+@@ -669,6 +670,7 @@ static Triple::VendorType parseVendor(StringRef VendorName) {
+       .Case("suse", Triple::SUSE)
+       .Case("oe", Triple::OpenEmbedded)
+       .Case("intel", Triple::Intel)
++      .Case("submilli", Triple::Submilli)
+       .Default(Triple::UnknownVendor);
+ }
+ 

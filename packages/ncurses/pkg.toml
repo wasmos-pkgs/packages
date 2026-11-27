@@ -1,0 +1,15 @@
+[package]
+name = "ncurses"
+version = "6.5"
+rev = 0
+kind = "dev"
+description = "GNU ncurses wide-char static libraries and headers for wasm64-submilli-linux-musl"
+license = "MIT"
+homepage = "https://invisible-island.net/ncurses/"
+build_deps = []
+runtime_deps = []
+
+[source]
+url = "https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz"
+sha256 = "136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"
+strip_components = 1

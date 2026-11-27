@@ -1,0 +1,90 @@
+name: Build Toolchain
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "toolchain/**"
+      - "scripts/oci.py"
+      - ".github/workflows/build-toolchain.yml"
+  pull_request:
+    paths:
+      - "toolchain/**"
+      - "scripts/oci.py"
+      - ".github/workflows/build-toolchain.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push built toolchain artifact to GHCR"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: toolchain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-toolchain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache lld zstd curl git python3
+
+      - name: Setup Rust toolchain (for wasmos-postlink)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore ccache for LLVM
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: llvm-ccache-${{ hashFiles('toolchain/toolchain.toml', 'toolchain/patches/**') }}
+          restore-keys: |
+            llvm-ccache-
+
+      - name: Build wasm64-submilli-linux-musl toolchain
+        env:
+          CCACHE_DIR: ${{ env.HOME }}/.ccache
+          CCACHE_MAXSIZE: 4G
+        run: |
+          ccache --zero-stats
+          python3 toolchain/build.py --out dist/toolchain.tar.zst
+          ccache --show-stats
+
+      - name: Smoke-test compiled toolchain
+        run: |
+          mkdir -p /tmp/test-tc
+          tar --zstd -xf dist/toolchain.tar.zst -C /tmp/test-tc
+          cat <<'EOF' > /tmp/hello.c
+          #include <stdio.h>
+          int main(void) { puts("hello"); return 0; }
+          EOF
+          /tmp/test-tc/bin/wasm64-submilli-linux-musl-clang -O2 /tmp/hello.c -o /tmp/hello.wasm
+          ls -lh /tmp/hello.wasm
+
+      - name: Publish toolchain to GHCR
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          TC_VER=$(python3 -c "import tomllib; print(tomllib.loads(open('toolchain/toolchain.toml').read())['toolchain']['version'])")
+          SHORT_SHA="${GITHUB_SHA::8}"
+          python3 scripts/oci.py push \
+            --repo wasmos-pkgs/toolchain \
+            --tag "${TC_VER}" \
+            --tag "${TC_VER}-${SHORT_SHA}" \
+            --tag latest \
+            --file dist/toolchain.tar.zst \
+            --arch amd64 \
+            --os linux \
+            --annotation "org.opencontainers.image.version=${TC_VER}" \
+            --annotation "org.opencontainers.image.description=wasm64-submilli-linux-musl cross-compilation toolchain"

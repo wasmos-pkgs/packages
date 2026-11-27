@@ -1,0 +1,11 @@
+# Build and staging directories
+/build/
+/dist/
+/sources/
+/tmp/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Rust build artifacts for toolchain/postlink
+/toolchain/postlink/target/

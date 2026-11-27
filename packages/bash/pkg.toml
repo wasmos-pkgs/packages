@@ -1,0 +1,15 @@
+[package]
+name = "bash"
+version = "5.3"
+rev = 0
+kind = "runtime"
+description = "GNU Bash 5.3 with GNU Readline 8.3 statically linked for wasm64-submilli-linux-musl"
+license = "GPL-3.0-or-later"
+homepage = "https://www.gnu.org/software/bash/"
+build_deps = ["ncurses"]
+runtime_deps = []
+
+[source]
+url = "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"
+sha256 = "0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba"
+strip_components = 1
