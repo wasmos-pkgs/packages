@@ -16,7 +16,7 @@
   "exe-suffix": "",
   "features": "+bulk-memory,+mutable-globals,+sign-ext,+nontrapping-fptoint,+reference-types,+simd128,+tail-call",
   "generate-arange-section": false,
-  "has-thread-local": true,
+  "has-thread-local": false,
   "is-like-wasm": true,
   "linker": "wasm64-submilli-linux-musl-clang",
   "linker-flavor": "wasm-lld-cc",
