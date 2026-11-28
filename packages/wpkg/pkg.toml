@@ -1,0 +1,15 @@
+[package]
+name = "wpkg"
+version = "0.1.0"
+rev = 0
+kind = "runtime"
+description = "WasmOS package manager for linux/wasm64 OCI packages on ghcr.io/wasmos-pkgs"
+license = "Apache-2.0"
+homepage = "https://github.com/submilli/wasmos"
+build_deps = []
+runtime_deps = []
+
+[source]
+git = "https://github.com/submilli/wasmos.git"
+branch = "main"
+rev = "cc44b22ac6ed3593d536dcd78afdf3ffab0d8485"
