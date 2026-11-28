@@ -54,6 +54,7 @@ def prepare_crate_patches(patches_dir: pathlib.Path) -> tuple[pathlib.Path, path
         lrs_lib.write_text(new_text, encoding="utf-8")
 
     # 2. rustix: include wasm64 in asm-generic Linux ioctl direction constants
+    # and skip duplicate statx_flags re-exports already provided by modern libc.
     rustix = fetch_crate("rustix", "1.1.3", patches_dir)
     ioctl = rustix / "src/ioctl/linux.rs"
     ioctl_text = ioctl.read_text(encoding="utf-8")
@@ -63,8 +64,18 @@ def prepare_crate_patches(patches_dir: pathlib.Path) -> tuple[pathlib.Path, path
             'target_arch = "csky",\n    target_arch = "wasm64"',
         )
         if new_text == ioctl_text:
-            raise SystemExit("Failed to patch rustix-1.1.3")
+            raise SystemExit("Failed to patch rustix-1.1.3 ioctl")
         ioctl.write_text(new_text, encoding="utf-8")
+    rustix_c = rustix / "src/backend/libc/c.rs"
+    rustix_c_text = rustix_c.read_text(encoding="utf-8")
+    if 'target_arch = "wasm64"' not in rustix_c_text:
+        new_c = rustix_c_text.replace(
+            'all(target_arch = "loongarch64", target_env = "musl")',
+            'all(target_arch = "loongarch64", target_env = "musl"),\n        all(target_arch = "wasm64", target_env = "musl")',
+        )
+        if new_c == rustix_c_text:
+            raise SystemExit("Failed to patch rustix-1.1.3 c.rs statx_flags")
+        rustix_c.write_text(new_c, encoding="utf-8")
 
     # 3. zlib-rs: opt into unstable simd_wasm64 when building with stock rustc + RUSTC_BOOTSTRAP=1
     zlib_rs = fetch_crate("zlib-rs", "0.5.5", patches_dir)
