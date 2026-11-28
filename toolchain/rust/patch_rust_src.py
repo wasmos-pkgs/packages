@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -124,13 +125,52 @@ def patch_library_dir(lib_dir: pathlib.Path) -> pathlib.Path:
         'target_arch = "arm64ec", target_family = "wasm", target_arch = "wasm64"',
     )
 
-    # 2. Patch vendored libc inside rust-src
+    # 2. Patch vendored libc inside rust-src and wire library/*/Cargo.toml directly to it
     libc_dirs = sorted((lib_dir / "vendor").glob("libc-*"))
     if not libc_dirs:
         raise RuntimeError(f"No vendored libc-* directory found under {lib_dir / 'vendor'}")
     for d in libc_dirs:
         patch_libc_dir(d)
+    libc_dirname = libc_dirs[0].name
+    for toml_path in sorted(lib_dir.glob("*/Cargo.toml")):
+        text = toml_path.read_text(encoding="utf-8")
+        if f'path = "../vendor/{libc_dirname}"' in text:
+            continue
+        new_text, count = re.subn(
+            r'^(libc\s*=\s*\{)',
+            rf'\1 path = "../vendor/{libc_dirname}",',
+            text,
+            flags=re.MULTILINE,
+        )
+        if count > 0:
+            toml_path.write_text(new_text, encoding="utf-8")
     return libc_dirs[0]
+
+
+def prepare_user_libc_override(out_sysroot: pathlib.Path, base_libc: pathlib.Path, version: str | None) -> pathlib.Path:
+    """Return a patched libc directory whose Cargo.toml version matches `version` (if given)."""
+    if not version:
+        return base_libc
+    dest = out_sysroot / "libc-overrides" / f"libc-{version}"
+    if (dest / "Cargo.toml").is_file():
+        return dest
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(base_libc, dest, symlinks=True)
+    libc_toml = dest / "Cargo.toml"
+    text = libc_toml.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r'^version\s*=\s*"[^"]+"',
+        f'version = "{version}"',
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n != 1:
+        raise RuntimeError(f"Failed to set patched libc version to {version} in {libc_toml}")
+    libc_toml.write_text(new_text, encoding="utf-8")
+    return dest
 
 
 def prepare_patched_sysroot(out_sysroot: pathlib.Path, rustc: str = "rustc") -> tuple[pathlib.Path, pathlib.Path]:
@@ -146,7 +186,8 @@ def prepare_patched_sysroot(out_sysroot: pathlib.Path, rustc: str = "rustc") -> 
     out_sysroot = out_sysroot.resolve()
     marker = out_sysroot / ".wasmos-rust-src-ready"
     rustc_ver = subprocess.check_output([rustc, "--version"], text=True).strip()
-    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == rustc_ver:
+    marker_tag = f"{rustc_ver} (patch-v3)"
+    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == marker_tag:
         libc_dirs = sorted((out_sysroot / "lib/rustlib/src/rust/library/vendor").glob("libc-*"))
         return out_sysroot, libc_dirs[0]
 
@@ -168,12 +209,12 @@ def prepare_patched_sysroot(out_sysroot: pathlib.Path, rustc: str = "rustc") -> 
             continue
         os.symlink(entry, out_sysroot / "lib/rustlib" / entry.name)
 
-    # Copy library/ so we can apply our 6-line wasm64 patch cleanly without touching rustup's files
+    # Copy library/ so we can apply our wasm64 patches cleanly without touching rustup's files
     dst_lib = out_sysroot / "lib/rustlib/src/rust/library"
     shutil.copytree(src_rust / "library", dst_lib, symlinks=True)
     patched_libc = patch_library_dir(dst_lib)
 
-    marker.write_text(rustc_ver + "\n", encoding="utf-8")
+    marker.write_text(marker_tag + "\n", encoding="utf-8")
     print(f"Prepared patched Rust sysroot at {out_sysroot} ({rustc_ver})", flush=True)
     return out_sysroot, patched_libc
 

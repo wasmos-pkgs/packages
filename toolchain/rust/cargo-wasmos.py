@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -35,6 +36,29 @@ exec "$DIR/llvm/bin/clang" -static "$@" --target={TRIPLE} --sysroot="$DIR/sysroo
     )
     linker.chmod(0o755)
     return linker
+
+
+def detect_locked_libc_version(cargo_args: list[str]) -> str | None:
+    manifest_dir = pathlib.Path.cwd()
+    for i, tok in enumerate(cargo_args):
+        if tok == "--manifest-path" and i + 1 < len(cargo_args):
+            manifest_dir = pathlib.Path(cargo_args[i + 1]).resolve().parent
+            break
+        if tok.startswith("--manifest-path="):
+            manifest_dir = pathlib.Path(tok.split("=", 1)[1]).resolve().parent
+            break
+    for parent in [manifest_dir, *manifest_dir.parents]:
+        lock_file = parent / "Cargo.lock"
+        if lock_file.is_file():
+            text = lock_file.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(
+                r'\[\[package\]\]\s*\nname\s*=\s*"libc"\s*\nversion\s*=\s*"(0\.2\.\d+)"',
+                text,
+            )
+            if m:
+                return m.group(1)
+            return None
+    return None
 
 
 def main() -> None:
@@ -71,7 +95,9 @@ def main() -> None:
         cargo_args = ["build", "--release"]
 
     sysroot_cache = args.sysroot_cache or (toolchain / "rust-sysroot")
-    patched_sysroot, libc_dir = patch_rust_src.prepare_patched_sysroot(sysroot_cache)
+    patched_sysroot, base_libc = patch_rust_src.prepare_patched_sysroot(sysroot_cache)
+    locked_libc = detect_locked_libc_version(cargo_args)
+    libc_dir = patch_rust_src.prepare_user_libc_override(patched_sysroot, base_libc, locked_libc)
     linker = args.linker.resolve() if args.linker else ensure_rust_linker(toolchain)
 
     env = os.environ.copy()
@@ -84,7 +110,7 @@ def main() -> None:
     env["RANLIB_wasm64_submilli_linux_musl"] = str(toolchain / f"bin/{TRIPLE}-ranlib")
 
     extra_rustflags = env.get("RUSTFLAGS", "").strip()
-    rustflags = f"--sysroot={patched_sysroot} -C linker={linker}"
+    rustflags = f"--sysroot={patched_sysroot} -C linker={linker} --cfg=rustix_use_libc"
     if extra_rustflags:
         rustflags = f"{rustflags} {extra_rustflags}"
     env["RUSTFLAGS"] = rustflags
