@@ -1,13 +1,13 @@
 [package]
 name = "xz"
 version = "5.6.4"
-rev = 0
+rev = 1
 kind = "dev"
-description = "XZ Utils liblzma static library and headers for wasm64-submilli-linux-musl"
+description = "XZ Utils liblzma shared and static libraries and headers for wasm64-submilli-linux-musl"
 license = "0BSD"
 homepage = "https://tukaani.org/xz/"
 build_deps = []
-runtime_deps = []
+runtime_deps = ["musl"]
 
 [source]
 url = "https://github.com/tukaani-project/xz/releases/download/v5.6.4/xz-5.6.4.tar.gz"

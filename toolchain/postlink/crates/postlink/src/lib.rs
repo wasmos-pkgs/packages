@@ -8,20 +8,25 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::fs;
+use std::path::PathBuf;
 
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     BlockType as EncBlockType, Catch as EncCatch, CodeSection, CustomSection, ExportKind,
-    Function, FunctionSection, Instruction, MemArg, MemArgTarget, Module, ValType as EncValType,
+    Function, FunctionSection, Instruction, MemArg, MemArgTarget, Module, NameSection,
+    ValType as EncValType,
 };
 use wasmparser::{
-    BinaryReaderError, BlockType, Catch, CodeSectionReader, CompositeInnerType,
+    BinaryReader, BinaryReaderError, BlockType, Catch, CodeSectionReader, CompositeInnerType,
     CustomSectionReader, ElementItems, ExportSectionReader, ExternalKind, FuncType, FunctionBody,
-    FunctionSectionReader, Operator, Parser, Payload, RefType, TypeRef, ValType, Validator,
-    WasmFeatures,
+    FunctionSectionReader, Name, NameSectionReader, Operator, Parser, Payload, RefType, TypeRef,
+    ValType, Validator, WasmFeatures,
 };
 use wasmos_abi::syscalls::{lookup_by_import_name, WALI_MODULE};
 use wasmos_abi::{kernel_block, TargetHeader, TARGET_SECTION_NAME};
+
+pub const FORK_EXPORTS_SECTION_NAME: &str = "submilli.fork_exports";
 
 #[derive(Debug)]
 pub enum PostlinkError {
@@ -66,10 +71,20 @@ pub struct PostlinkStats {
     pub instrumented: bool,
 }
 
+#[derive(Clone, Copy)]
+enum KbMode {
+    StaticTls {
+        tls_base_global: u32,
+        kb_offset_global: u32,
+    },
+    ImportedGlobal(u32),
+}
+
 #[derive(Clone, Debug)]
 struct ImportedFunc {
     type_idx: u32,
     is_process_fork: bool,
+    may_fork_cross_dso: bool,
 }
 
 #[derive(Default)]
@@ -80,6 +95,12 @@ struct ModuleInfo {
     global_types: Vec<ValType>,
     tls_base_global: Option<u32>,
     kb_offset_global: Option<u32>,
+    imported_kb_global: Option<u32>,
+    has_dylink: bool,
+    has_imported_table: bool,
+    defines_libc_start_main: bool,
+    exported_funcs: Vec<(String, u32)>,
+    dylink_needed: Vec<String>,
     target_header: Option<TargetHeader>,
     address_taken_by_sig: BTreeMap<FuncType, BTreeSet<u32>>,
     direct_callees: Vec<BTreeSet<u32>>,
@@ -126,7 +147,166 @@ fn record_addr_taken(info: &mut ModuleInfo, func_idx: u32) -> Result<(), Postlin
     Ok(())
 }
 
-fn analyze_module(wasm: &[u8]) -> Result<ModuleInfo, PostlinkError> {
+fn parse_dylink_needed(data: &[u8]) -> Vec<String> {
+    const WASM_DYLINK_NEEDED: u32 = 2;
+    let mut needed = Vec::new();
+    let mut reader = BinaryReader::new(data, 0);
+    while !reader.eof() {
+        let Ok(sub_ty) = reader.read_var_u32() else {
+            break;
+        };
+        let Ok(sub_len_u32) = reader.read_var_u32() else {
+            break;
+        };
+        let Ok(sub_len) = usize::try_from(sub_len_u32) else {
+            break;
+        };
+        let Ok(sub_bytes) = reader.read_bytes(sub_len) else {
+            break;
+        };
+        if sub_ty == WASM_DYLINK_NEEDED {
+            let mut sub_r = BinaryReader::new(sub_bytes, 0);
+            let Ok(count) = sub_r.read_var_u32() else {
+                break;
+            };
+            for _ in 0..count {
+                let Ok(str_len_u32) = sub_r.read_var_u32() else {
+                    break;
+                };
+                let Ok(str_len) = usize::try_from(str_len_u32) else {
+                    break;
+                };
+                let Ok(raw) = sub_r.read_bytes(str_len) else {
+                    break;
+                };
+                if let Ok(s) = std::str::from_utf8(raw) {
+                    needed.push(s.to_string());
+                }
+            }
+        }
+    }
+    needed
+}
+
+fn extract_exports_from_so(wasm: &[u8]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut needed = Vec::new();
+    let mut fork_exports = Vec::new();
+    let mut all_func_exports = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload {
+            Ok(Payload::CustomSection(sec)) => {
+                if sec.name() == "dylink.0" {
+                    needed.extend(parse_dylink_needed(sec.data()));
+                } else if sec.name() == FORK_EXPORTS_SECTION_NAME {
+                    if let Ok(text) = std::str::from_utf8(sec.data()) {
+                        for line in text.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                fork_exports.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Payload::ExportSection(reader)) => {
+                for export in reader.into_iter().flatten() {
+                    if matches!(export.kind, ExternalKind::Func | ExternalKind::FuncExact) {
+                        all_func_exports.push(export.name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (needed, fork_exports, all_func_exports)
+}
+
+fn collect_external_fork_symbols(
+    initial_needed: &[String],
+    lib_dirs: &[PathBuf],
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut fork_syms: BTreeSet<String> = [
+        "fork",
+        "_Fork",
+        "vfork",
+        "popen",
+        "system",
+        "wordexp",
+        "__libc_start_main",
+        "__main_argc_argv",
+        "__main_void",
+        "main",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let mut known_so_exports = BTreeSet::new();
+
+    let mut visited = BTreeSet::new();
+    let mut queue: VecDeque<String> = initial_needed.iter().cloned().collect();
+
+    // Also scan `.so` files directly in `lib_dirs` so `-shared` modules built with
+    // `ImportDynamic` (e.g. Python C-extensions without explicit `-lpython3.13`)
+    // discover `libpython3.13.so`'s fork-capable C-API exports automatically.
+    for dir in lib_dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(s) = name.to_str() {
+                if s.ends_with(".so") || s.contains(".so.") {
+                    queue.push_back(s.to_string());
+                }
+            }
+        }
+    }
+
+    while let Some(so_name) = queue.pop_front() {
+        if !visited.insert(so_name.clone()) {
+            continue;
+        }
+        for dir in lib_dirs {
+            let cand = dir.join(&so_name);
+            let Ok(bytes) = fs::read(&cand) else {
+                continue;
+            };
+            if bytes.get(..4) != Some(b"\0asm") {
+                continue;
+            }
+            let (more_needed, f_exports, func_exports) = extract_exports_from_so(&bytes);
+            fork_syms.extend(f_exports);
+            known_so_exports.extend(func_exports);
+            for dep in more_needed {
+                if !visited.contains(&dep) {
+                    queue.push_back(dep);
+                }
+            }
+            break;
+        }
+    }
+    (fork_syms, known_so_exports)
+}
+
+fn peek_dylink_info(wasm: &[u8]) -> (bool, Vec<String>) {
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload {
+            Ok(Payload::CustomSection(sec)) if sec.name() == "dylink.0" => {
+                return (true, parse_dylink_needed(sec.data()));
+            }
+            Ok(Payload::TypeSection(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+    (false, Vec::new())
+}
+
+fn analyze_module(
+    wasm: &[u8],
+    has_dylink_hint: bool,
+    external_fork_syms: &BTreeSet<String>,
+    known_so_exports: &BTreeSet<String>,
+) -> Result<ModuleInfo, PostlinkError> {
     let mut info = ModuleInfo::default();
     let mut elem_funcs: Vec<u32> = Vec::new();
     let mut code_bodies: Vec<FunctionBody<'_>> = Vec::new();
@@ -152,12 +332,27 @@ fn analyze_module(wasm: &[u8]) -> Result<ModuleInfo, PostlinkError> {
                             let is_process_fork = import.module == WALI_MODULE
                                 && lookup_by_import_name(import.name)
                                     .is_some_and(|spec| spec.is_process_fork);
+                            let may_fork_cross_dso = !is_process_fork
+                                && import.module == "env"
+                                && (external_fork_syms.contains(import.name)
+                                    || (has_dylink_hint && !known_so_exports.contains(import.name)));
                             info.imported_funcs.push(ImportedFunc {
                                 type_idx,
                                 is_process_fork,
+                                may_fork_cross_dso,
                             });
                         }
-                        TypeRef::Global(g) => info.global_types.push(g.content_type),
+                        TypeRef::Global(g) => {
+                            let idx_u32 = u32::try_from(info.global_types.len())
+                                .map_err(|_| PostlinkError::InvalidIndex("global import"))?;
+                            if import.module == "submilli" && import.name == "__kernel_block" {
+                                info.imported_kb_global = Some(idx_u32);
+                            }
+                            info.global_types.push(g.content_type);
+                        }
+                        TypeRef::Table(_) => {
+                            info.has_imported_table = true;
+                        }
                         _ => {}
                     }
                 }
@@ -206,6 +401,10 @@ fn analyze_module(wasm: &[u8]) -> Result<ModuleInfo, PostlinkError> {
                 }
             }
             Payload::CodeSectionEntry(body) => code_bodies.push(body),
+            Payload::CustomSection(sec) if sec.name() == "dylink.0" => {
+                info.has_dylink = true;
+                info.dylink_needed = parse_dylink_needed(sec.data());
+            }
             Payload::CustomSection(sec) if sec.name() == TARGET_SECTION_NAME => {
                 let hdr =
                     TargetHeader::decode(sec.data()).map_err(|_| PostlinkError::InvalidTargetHeader)?;
@@ -252,12 +451,22 @@ fn process_exports(
 ) -> Result<(), PostlinkError> {
     for export in reader {
         let export = export?;
-        if export.kind == ExternalKind::Global {
-            if export.name == "__tls_base" {
-                info.tls_base_global = Some(export.index);
-            } else if export.name == "__submilli_kernel_block" {
-                info.kb_offset_global = Some(export.index);
+        match export.kind {
+            ExternalKind::Global => {
+                if export.name == "__tls_base" {
+                    info.tls_base_global = Some(export.index);
+                } else if export.name == "__submilli_kernel_block" {
+                    info.kb_offset_global = Some(export.index);
+                }
             }
+            ExternalKind::Func | ExternalKind::FuncExact => {
+                if export.name == "__libc_start_main" {
+                    info.defines_libc_start_main = true;
+                }
+                info.exported_funcs
+                    .push((export.name.to_string(), export.index));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -268,12 +477,22 @@ fn process_exports(
 fn compute_fork_reachable(info: &ModuleInfo) -> Result<(BTreeSet<u32>, BTreeSet<FuncType>), PostlinkError> {
     let mut fork_funcs = BTreeSet::new();
     for (idx, imp) in info.imported_funcs.iter().enumerate() {
-        if imp.is_process_fork {
+        if imp.is_process_fork || imp.may_fork_cross_dso {
             let idx_u32 = u32::try_from(idx).map_err(|_| PostlinkError::InvalidIndex("import"))?;
             fork_funcs.insert(idx_u32);
         }
     }
-    if fork_funcs.is_empty() {
+
+    let mut extra_indirect_sigs = BTreeSet::new();
+    if info.has_dylink && info.defines_libc_start_main {
+        // In `libc.so`, `libc_start_main_stage2` calls the PIE's `main(int, char**, char**)`
+        // via function pointer; mark that indirect signature fork-capable so `libc_start_main`
+        // unwinds cleanly whenever the PIE's `main` calls `fork()`.
+        let main_sig = FuncType::new([ValType::I32, ValType::I64, ValType::I64], [ValType::I32]);
+        extra_indirect_sigs.insert(main_sig);
+    }
+
+    if fork_funcs.is_empty() && extra_indirect_sigs.is_empty() {
         return Ok((fork_funcs, BTreeSet::new()));
     }
 
@@ -293,6 +512,9 @@ fn compute_fork_reachable(info: &ModuleInfo) -> Result<(BTreeSet<u32>, BTreeSet<
         }
         if let Some(sigs) = info.indirect_sig_calls.get(def_idx) {
             for sig in sigs {
+                if extra_indirect_sigs.contains(sig) {
+                    fork_funcs.insert(caller);
+                }
                 if let Some(targets) = info.address_taken_by_sig.get(sig) {
                     for &target in targets {
                         reverse_edges.entry(target).or_default().insert(caller);
@@ -313,7 +535,7 @@ fn compute_fork_reachable(info: &ModuleInfo) -> Result<(BTreeSet<u32>, BTreeSet<
         }
     }
 
-    let mut fork_indirect_sigs = BTreeSet::new();
+    let mut fork_indirect_sigs = extra_indirect_sigs;
     for (sig, targets) in &info.address_taken_by_sig {
         if targets.iter().any(|f| fork_funcs.contains(f)) {
             fork_indirect_sigs.insert(sig.clone());
@@ -1255,8 +1477,7 @@ type SavedEntry = (u32, ValType, u64);
 
 struct FuncEmitter<'m> {
     func_results: Vec<ValType>,
-    tls_base_global: u32,
-    kb_offset_global: u32,
+    kb_mode: KbMode,
     next_local: u32,
     added_locals: Vec<EncValType>,
     saved_locals: Vec<(u32, ValType)>,
@@ -1273,8 +1494,7 @@ impl<'m> FuncEmitter<'m> {
     fn new(
         orig_locals: &[ValType],
         func_results: Vec<ValType>,
-        tls_base_global: u32,
-        kb_offset_global: u32,
+        kb_mode: KbMode,
     ) -> Result<Self, PostlinkError> {
         let next_local =
             u32::try_from(orig_locals.len()).map_err(|_| PostlinkError::InvalidIndex("locals"))?;
@@ -1288,8 +1508,7 @@ impl<'m> FuncEmitter<'m> {
         }
         let mut emitter = Self {
             func_results,
-            tls_base_global,
-            kb_offset_global,
+            kb_mode,
             next_local,
             added_locals: Vec::new(),
             saved_locals,
@@ -1392,9 +1611,19 @@ impl<'m> FuncEmitter<'m> {
     }
 
     fn emit_compute_kb_addr(&self, out: &mut Vec<Instruction<'m>>) {
-        out.push(Instruction::GlobalGet(self.tls_base_global));
-        out.push(Instruction::GlobalGet(self.kb_offset_global));
-        out.push(Instruction::I64Add);
+        match self.kb_mode {
+            KbMode::StaticTls {
+                tls_base_global,
+                kb_offset_global,
+            } => {
+                out.push(Instruction::GlobalGet(tls_base_global));
+                out.push(Instruction::GlobalGet(kb_offset_global));
+                out.push(Instruction::I64Add);
+            }
+            KbMode::ImportedGlobal(kb_global) => {
+                out.push(Instruction::GlobalGet(kb_global));
+            }
+        }
         out.push(Instruction::LocalTee(self.kb_addr_local));
     }
 
@@ -2341,8 +2570,7 @@ struct ForkRewriter<'m> {
     /// Map from imported fork syscall function index -> synthesized trampoline function index.
     trampolines: BTreeMap<u32, u32>,
     trampoline_list: Vec<(u32, u32)>, // (import_func_idx, type_idx)
-    tls_base_global: u32,
-    kb_offset_global: u32,
+    kb_mode: KbMode,
 }
 
 impl<'m> Reencode for ForkRewriter<'m> {
@@ -2402,7 +2630,23 @@ impl<'m> Reencode for ForkRewriter<'m> {
         section: CustomSectionReader<'_>,
     ) -> Result<(), reencode::Error<Self::Error>> {
         if section.name() == "name" {
-            // Drop debug name section when appending synthetic fork trampolines.
+            // Preserve module name (`--soname=...` for shared libraries) while dropping
+            // function/local debug names invalidated by synthetic trampolines.
+            let mut names = NameSection::new();
+            let mut has_module_name = false;
+            let reader = NameSectionReader::new(BinaryReader::new(section.data(), 0));
+            for sub in reader {
+                if let Ok(Name::Module { name, .. }) = sub {
+                    names.module(name);
+                    has_module_name = true;
+                }
+            }
+            if has_module_name {
+                module.section(&names);
+            }
+            return Ok(());
+        }
+        if section.name() == FORK_EXPORTS_SECTION_NAME {
             return Ok(());
         }
         if section.name() == TARGET_SECTION_NAME {
@@ -2446,7 +2690,7 @@ impl<'m> Reencode for ForkRewriter<'m> {
             let _ = ExportKind::Func;
             exports.export(export.name, kind, index);
         }
-        if !has_table_export {
+        if !has_table_export && !self.info.has_imported_table {
             exports.export("__indirect_function_table", ExportKind::Table, 0);
         }
         Ok(())
@@ -2486,12 +2730,7 @@ impl<'m> ForkRewriter<'m> {
         let (ast, end_poly) = tracker.parse_body(&ops)?;
         if list_fork_range(&ast).is_none() {
             // Unreachable dead call edge only; emit original body untouched via plain emitter.
-            let mut emitter = FuncEmitter::new(
-                &all_locals,
-                fty.results().to_vec(),
-                self.tls_base_global,
-                self.kb_offset_global,
-            )?;
+            let mut emitter = FuncEmitter::new(&all_locals, fty.results().to_vec(), self.kb_mode)?;
             emitter.added_locals.clear();
             let mut decls = Vec::new();
             for &ty in all_locals.get(fty.params().len()..).unwrap_or(&[]) {
@@ -2511,12 +2750,7 @@ impl<'m> ForkRewriter<'m> {
             .len()
             .checked_sub(fty.params().len())
             .ok_or(PostlinkError::InvalidIndex("declared locals"))?;
-        let mut emitter = FuncEmitter::new(
-            &all_locals,
-            fty.results().to_vec(),
-            self.tls_base_global,
-            self.kb_offset_global,
-        )?;
+        let mut emitter = FuncEmitter::new(&all_locals, fty.results().to_vec(), self.kb_mode)?;
         // Prepend original declared locals before synthetic locals in Function::new!
         let synth_locals = std::mem::take(&mut emitter.added_locals);
         for &ty in all_locals
@@ -2547,11 +2781,20 @@ impl<'m> ForkRewriter<'m> {
         let kb_local = param_count;
         let mut func = Function::new([(1, EncValType::I64)]);
 
-        // kb = __tls_base + __submilli_kernel_block
-        func.instruction(&Instruction::GlobalGet(self.tls_base_global))
-            .instruction(&Instruction::GlobalGet(self.kb_offset_global))
-            .instruction(&Instruction::I64Add)
-            .instruction(&Instruction::LocalTee(kb_local))
+        match self.kb_mode {
+            KbMode::StaticTls {
+                tls_base_global,
+                kb_offset_global,
+            } => {
+                func.instruction(&Instruction::GlobalGet(tls_base_global))
+                    .instruction(&Instruction::GlobalGet(kb_offset_global))
+                    .instruction(&Instruction::I64Add);
+            }
+            KbMode::ImportedGlobal(kb_global) => {
+                func.instruction(&Instruction::GlobalGet(kb_global));
+            }
+        }
+        func.instruction(&Instruction::LocalTee(kb_local))
             .instruction(&Instruction::I32Load(memarg_64(kernel_block::STATE_OFFSET, 2)))
             .instruction(&Instruction::I32Const(
                 i32::try_from(kernel_block::STATE_REWINDING).unwrap_or(2),
@@ -2583,7 +2826,22 @@ impl<'m> ForkRewriter<'m> {
 
 /// Analyze and instrument a linked `wasm64-submilli-linux-musl` module for `fork()`.
 pub fn rewrite_module(wasm: &[u8]) -> Result<(Vec<u8>, PostlinkStats), PostlinkError> {
-    let info = analyze_module(wasm)?;
+    rewrite_module_with_paths(wasm, &[])
+}
+
+/// Analyze and instrument a linked static, PIE, or shared (`dylink.0`) module for `fork()`.
+pub fn rewrite_module_with_paths(
+    wasm: &[u8],
+    lib_dirs: &[PathBuf],
+) -> Result<(Vec<u8>, PostlinkStats), PostlinkError> {
+    let (has_dylink, needed) = peek_dylink_info(wasm);
+    let (external_fork_syms, known_so_exports) =
+        if !has_dylink && lib_dirs.is_empty() && needed.is_empty() {
+            (BTreeSet::new(), BTreeSet::new())
+        } else {
+            collect_external_fork_symbols(&needed, lib_dirs)
+        };
+    let info = analyze_module(wasm, has_dylink, &external_fork_syms, &known_so_exports)?;
     let defined_functions = info.defined_func_types.len();
 
     // If already instrumented by an earlier postlink invocation, validate and return as-is.
@@ -2618,12 +2876,20 @@ pub fn rewrite_module(wasm: &[u8]) -> Result<(Vec<u8>, PostlinkStats), PostlinkE
         ));
     }
 
-    let tls_base_global = info
-        .tls_base_global
-        .ok_or(PostlinkError::MissingGlobalExport("__tls_base"))?;
-    let kb_offset_global = info
-        .kb_offset_global
-        .ok_or(PostlinkError::MissingGlobalExport("__submilli_kernel_block"))?;
+    let kb_mode = if let Some(kb_global) = info.imported_kb_global {
+        KbMode::ImportedGlobal(kb_global)
+    } else {
+        let tls_base_global = info
+            .tls_base_global
+            .ok_or(PostlinkError::MissingGlobalExport("__tls_base"))?;
+        let kb_offset_global = info
+            .kb_offset_global
+            .ok_or(PostlinkError::MissingGlobalExport("__submilli_kernel_block"))?;
+        KbMode::StaticTls {
+            tls_base_global,
+            kb_offset_global,
+        }
+    };
 
     let mut trampolines = BTreeMap::new();
     let mut trampoline_list = Vec::new();
@@ -2651,8 +2917,7 @@ pub fn rewrite_module(wasm: &[u8]) -> Result<(Vec<u8>, PostlinkStats), PostlinkE
         fork_indirect_sigs: &fork_indirect_sigs,
         trampolines,
         trampoline_list,
-        tls_base_global,
-        kb_offset_global,
+        kb_mode,
     };
 
     let mut out_mod = Module::new();
@@ -2662,6 +2927,23 @@ pub fn rewrite_module(wasm: &[u8]) -> Result<(Vec<u8>, PostlinkStats), PostlinkE
             reencode::Error::UserError(ue) => ue,
             other => PostlinkError::Reencode(format!("{other:?}")),
         })?;
+
+    if info.has_dylink {
+        let mut fork_exports_payload = String::new();
+        for (name, func_idx) in &info.exported_funcs {
+            if fork_funcs.contains(func_idx) {
+                fork_exports_payload.push_str(name);
+                fork_exports_payload.push('\n');
+            }
+        }
+        if !fork_exports_payload.is_empty() {
+            out_mod.section(&CustomSection {
+                name: FORK_EXPORTS_SECTION_NAME.into(),
+                data: fork_exports_payload.as_bytes().into(),
+            });
+        }
+    }
+
     let out_bytes = out_mod.finish();
     validate_wasm(&out_bytes)?;
 

@@ -65,8 +65,10 @@ def fetch_source(pkg_name: str, src_cfg: dict[str, object], src_dir: pathlib.Pat
         if res.returncode != 0:
             subprocess.run(["git", "-C", str(src_dir), "fetch", "--depth", "200", "origin", branch], check=True)
         subprocess.run(["git", "-C", str(src_dir), "checkout", "--detach", rev], check=True)
+    elif src_cfg.get("builtin"):
+        return
     else:
-        raise SystemExit(f"Package '{pkg_name}' [source] must specify either 'url' or 'git'")
+        raise SystemExit(f"Package '{pkg_name}' [source] must specify 'url', 'git', or 'builtin = true'")
 
 
 def install_build_deps(

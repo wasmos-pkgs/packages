@@ -77,9 +77,3 @@ static void static_init_tls(size_t *aux)
 }
 
 weak_alias(static_init_tls, __init_tls);
-
-void *__tls_get_addr(tls_mod_off_t *v)
-{
-	(void)v;
-	return 0;
-}

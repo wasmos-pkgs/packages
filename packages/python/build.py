@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Cross-compile batteries-included static `CPython 3.13.2` for
-`wasm64-submilli-linux-musl` -> `$WASMOS_DESTDIR/usr/{bin,lib/python3.13}`.
+"""Cross-compile dynamic `CPython 3.13.2` (`libpython3.13.so.1.0`, dynamic
+`lib-dynload/*.cpython-313-wasm64-linux-musl.so` extensions, and C API headers)
+for `wasm64-submilli-linux-musl` -> `$WASMOS_DESTDIR/usr/{bin,include,lib}`.
 """
 
 from __future__ import annotations
@@ -29,16 +30,23 @@ def patch_cpython_source(py_src: pathlib.Path) -> None:
 
     triplet_c = py_src / "Misc/platform_triplet.c"
     text = triplet_c.read_text(encoding="utf-8")
-    if "PLATFORM_TRIPLET=wasm64-linux-LIBC" not in text:
-        target = "# elif defined(__riscv)\n"
+    if "PLATFORM_TRIPLET=wasm64-linux-musl" not in text:
+        target = "#elif defined(__linux__)\n"
         addition = (
-            "# elif defined(__wasm64__)\n"
-            "PLATFORM_TRIPLET=wasm64-linux-LIBC\n"
-            "# elif defined(__riscv)\n"
+            "#elif defined(__wasm64__) && defined(__linux__)\n"
+            "PLATFORM_TRIPLET=wasm64-linux-musl\n"
+            "#elif defined(__linux__)\n"
         )
         if target not in text:
-            raise SystemExit("Could not locate __riscv anchor in Misc/platform_triplet.c")
+            raise SystemExit("Could not locate __linux__ anchor in Misc/platform_triplet.c")
         triplet_c.write_text(text.replace(target, addition, 1), encoding="utf-8")
+
+    configure_sh = py_src / "configure"
+    cfg_text = configure_sh.read_text(encoding="utf-8")
+    old_block = "  wasm32|wasm64) :\n    MODULE_BUILDTYPE=static ;; #("
+    new_block = "  wasm32|wasm64) :\n    MODULE_BUILDTYPE=${MODULE_BUILDTYPE:-shared} ;; #("
+    if old_block in cfg_text:
+        configure_sh.write_text(cfg_text.replace(old_block, new_block, 1), encoding="utf-8")
 
 
 def build_host_python(py_src: pathlib.Path, host_bdir: pathlib.Path) -> pathlib.Path:
@@ -95,8 +103,9 @@ def main() -> None:
                 "ac_cv_buggy_getaddrinfo=no",
                 "ac_cv_file__dev_ptmx=yes",
                 "ac_cv_file__dev_ptc=no",
-                "ac_cv_func_dlopen=no",
-                "ac_cv_lib_dl_dlopen=no",
+                "ac_cv_func_dlopen=yes",
+                "ac_cv_header_dlfcn_h=yes",
+                "ac_cv_search_dlopen='none required'",
                 "ac_cv_func_posix_spawn=no",
                 "ac_cv_func_posix_spawnp=no",
                 "ac_cv_func_memfd_create=no",
@@ -104,7 +113,7 @@ def main() -> None:
                 "ac_cv_func_preadv2=no",
                 "ac_cv_func_pwritev=no",
                 "ac_cv_func_pwritev2=no",
-                "ac_cv_func_pthread_kill=no",
+                "ac_cv_func_pthread_kill=yes",
                 "ac_cv_header_linux_vm_sockets_h=no",
                 "ac_cv_header_linux_can_h=no",
                 "ac_cv_header_linux_can_raw_h=no",
@@ -135,22 +144,25 @@ def main() -> None:
     )
 
     build_triplet = subprocess.check_output(["sh", str(SRC / "config.guess")], text=True).strip()
+    cc = str(CROSS_BIN / f"{TRIPLE}-clang")
+    strip_bin = str(CROSS_BIN / f"{TRIPLE}-strip")
+
     env = os.environ.copy()
     env["PATH"] = f"{CROSS_BIN}:{env.get('PATH', '')}"
-    env["CC"] = str(CROSS_BIN / f"{TRIPLE}-clang")
+    env["CC"] = cc
     env["CXX"] = str(CROSS_BIN / f"{TRIPLE}-clang++")
     env["CPP"] = str(CROSS_BIN / f"{TRIPLE}-cpp")
     env["AR"] = str(CROSS_BIN / f"{TRIPLE}-ar")
     env["RANLIB"] = str(CROSS_BIN / f"{TRIPLE}-ranlib")
     env["NM"] = str(CROSS_BIN / f"{TRIPLE}-nm")
-    env["STRIP"] = str(CROSS_BIN / f"{TRIPLE}-strip")
+    env["STRIP"] = strip_bin
     env["READELF"] = shutil.which("true") or "/usr/bin/true"
     env["PKG_CONFIG_LIBDIR"] = str(SYSROOT / "lib/pkgconfig")
     env["PKG_CONFIG_PATH"] = str(SYSROOT / "lib/pkgconfig")
     env["CONFIG_SITE"] = str(config_site)
-    env["CFLAGS"] = f"-O2 -I{SYSROOT / 'include'} -I{SYSROOT / 'include/ncursesw'}"
+    env["CFLAGS"] = f"-O2 -fPIC -I{SYSROOT / 'include'} -I{SYSROOT / 'include/ncursesw'}"
     env["CPPFLAGS"] = f"-I{SYSROOT / 'include'} -I{SYSROOT / 'include/ncursesw'}"
-    env["LDFLAGS"] = f"-static -Wl,-z,stack-size=8388608 -L{SYSROOT / 'lib'}"
+    env["LDFLAGS"] = f"-Wl,-z,stack-size=8388608 -Wl,-rpath,/usr/lib -L{SYSROOT / 'lib'}"
     env["ZLIB_CFLAGS"] = f"-I{SYSROOT / 'include'}"
     env["ZLIB_LIBS"] = "-lz"
     env["BZIP2_CFLAGS"] = f"-I{SYSROOT / 'include'}"
@@ -163,11 +175,10 @@ def main() -> None:
     env["CURSES_LIBS"] = "-lncursesw"
     env["PANEL_CFLAGS"] = f"-I{SYSROOT / 'include'} -I{SYSROOT / 'include/ncursesw'}"
     env["PANEL_LIBS"] = "-lpanelw -lncursesw"
-    env["CCSHARED"] = " "
-    env["LINKFORSHARED"] = " "
-    env["LDSHARED"] = env["CC"]
-    env["BLDSHARED"] = env["CC"]
-    env["MODULE_BUILDTYPE"] = "static"
+    env["CCSHARED"] = "-fPIC"
+    env["LINKFORSHARED"] = "-Wl,--export-dynamic"
+    env["LDSHARED"] = f"{cc} -shared -L{SYSROOT / 'lib'}"
+    env["BLDSHARED"] = f"{cc} -shared -L{SYSROOT / 'lib'}"
 
     subprocess.run(
         [
@@ -177,7 +188,7 @@ def main() -> None:
             f"--host={TRIPLE}",
             f"--with-build-python={host_python}",
             "--prefix=/usr",
-            "--disable-shared",
+            "--enable-shared",
             "--enable-ipv6",
             "--without-mimalloc",
             "--without-ensurepip",
@@ -194,15 +205,18 @@ def main() -> None:
     subprocess.run(["make", f"DESTDIR={DESTDIR}", "install"], cwd=wasm_bdir, env=env, check=True)
 
     py_bin = DESTDIR / "usr/bin/python3.13"
-    subprocess.run(
-        [
-            str(CROSS_BIN / f"{TRIPLE}-strip"),
-            "--strip-debug",
-            "--keep-section=submilli.target",
-            str(py_bin),
-        ],
-        check=True,
-    )
+    libpython_so = DESTDIR / "usr/lib/libpython3.13.so.1.0"
+    dynload_dir = DESTDIR / "usr/lib/python3.13/lib-dynload"
+    if not py_bin.is_file() or not libpython_so.is_file():
+        raise SystemExit("Expected python3.13 and libpython3.13.so.1.0 were not built")
+    if b"dylink.0" not in py_bin.read_bytes()[:256]:
+        raise SystemExit("Expected python3.13 to be dynamically linked")
+
+    dynload_sos = sorted(dynload_dir.glob("*.so"))
+    required_exts = ("_ssl", "_hashlib", "_sqlite3", "zlib", "_bz2", "_lzma", "_curses", "math", "_json")
+    for req in required_exts:
+        if not any(so.name.startswith(f"{req}.") for so in dynload_sos):
+            raise SystemExit(f"Missing expected dynamic extension module '{req}' in {dynload_dir}")
 
     # Remove non-Wasm helper scripts in /usr/bin (`python3.13-config`, `idle3*`, `pydoc3*`, `2to3*`)
     for p in list((DESTDIR / "usr/bin").iterdir()):
@@ -213,7 +227,7 @@ def main() -> None:
         py_sym.unlink()
     os.symlink("python3", py_sym)
 
-    # Prune static archive, headers, pkgconfig, manpages, and heavy test/GUI stdlib dirs for runtime package
+    # Prune static archive, manpages, config static dir, and heavy test/GUI stdlib dirs while keeping C headers
     py_lib = DESTDIR / "usr/lib/python3.13"
     for heavy_dir in ("test", "tests", "idlelib", "tkinter", "turtledemo", "ensurepip", "pydoc_data"):
         p = py_lib / heavy_dir
@@ -223,8 +237,6 @@ def main() -> None:
         shutil.rmtree(cfg_dir)
     for extra in (
         DESTDIR / "usr/lib/libpython3.13.a",
-        DESTDIR / "usr/lib/pkgconfig",
-        DESTDIR / "usr/include",
         DESTDIR / "usr/share/man",
     ):
         if extra.is_dir():
@@ -234,15 +246,32 @@ def main() -> None:
     for pycache in list(py_lib.rglob("__pycache__")):
         shutil.rmtree(pycache, ignore_errors=True)
 
-    # Ensure only the Wasm interpreter binary has +x permission (`verify_outputs` enforces executable == \0asm)
+    # Strip debug sections and enforce executable bit only on \0asm binaries
     for p in DESTDIR.rglob("*"):
         if p.is_file() and not p.is_symlink():
-            if p == py_bin:
+            if p.read_bytes()[:4] == b"\x00asm":
+                subprocess.run(
+                    [
+                        strip_bin,
+                        "--strip-debug",
+                        "--keep-section=dylink.0",
+                        "--keep-section=submilli.target",
+                        "--keep-section=submilli.fork_exports",
+                        "--keep-section=name",
+                        str(p),
+                    ],
+                    check=True,
+                )
                 p.chmod(0o755)
             else:
                 p.chmod(0o644)
 
-    print(f"Built CPython 3.13.2 -> {py_bin} ({py_bin.stat().st_size} bytes)", flush=True)
+    print(
+        f"Built dynamic CPython 3.13.2 -> {py_bin} ({py_bin.stat().st_size} bytes), "
+        f"{libpython_so} ({libpython_so.stat().st_size} bytes), "
+        f"{len(dynload_sos)} extension .so modules",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

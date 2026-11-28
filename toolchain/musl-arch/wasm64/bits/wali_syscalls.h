@@ -4,10 +4,14 @@
 
 #define __WALI_IMPORT(name) __attribute__((__import_module__("wali"), __import_name__(name)))
 
-/* Dedicated process/thread creation imports for static fork call-graph precision */
+/* Dedicated process/thread/dlfcn imports */
 __WALI_IMPORT("SYS_fork") long __wali_sys_fork(void);
 __WALI_IMPORT("SYS_vfork") long __wali_sys_vfork(void);
 __WALI_IMPORT("SYS_thread_clone") long __wali_sys_thread_clone(long, long, long, long, long);
+__WALI_IMPORT("SYS_dlopen") long __wali_sys_dlopen(long, int, long, long, long, long);
+__WALI_IMPORT("SYS_dlsym") long __wali_sys_dlsym(long, long, long, long, long);
+__WALI_IMPORT("SYS_dlclose") long __wali_sys_dlclose(long);
+__WALI_IMPORT("SYS_dladdr") long __wali_sys_dladdr(long, long);
 __WALI_IMPORT("SYS__syscall") long __wali_sys_fallback(long, long, long, long, long, long, long);
 
 __WALI_IMPORT("SYS_io_setup") long __wali_sys_io_setup(long, long, long, long, long, long);

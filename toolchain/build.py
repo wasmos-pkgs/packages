@@ -304,7 +304,7 @@ exec "$DIR/llvm/bin/clang" --target={TRIPLE} --sysroot="$DIR/sysroot" -E "$@"
 """
     rust_linker_script = f"""#!/bin/sh
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-exec "$DIR/llvm/bin/clang" "$@" --target={TRIPLE} --sysroot="$DIR/sysroot" "$DIR/sysroot/lib/libclang_rt.builtins-wasm64.a"
+exec "$DIR/llvm/bin/clang" -static "$@" --target={TRIPLE} --sysroot="$DIR/sysroot" "$DIR/sysroot/lib/libclang_rt.builtins-wasm64.a"
 """
     for name in ("clang", "gcc", "cc"):
         write_exec(bin_dir / f"{TRIPLE}-{name}", cc_script)
@@ -353,6 +353,7 @@ def build_compiler_rt(
                 f"--target={TRIPLE}",
                 f"--sysroot={sysroot}",
                 "-O2",
+                "-fPIC",
                 "-std=c11",
                 "-fno-builtin",
                 "-fvisibility=hidden",
@@ -428,9 +429,10 @@ def main() -> None:
 
     llvm_build = work / "build-llvm"
     llvm_build.mkdir(parents=True, exist_ok=True)
+    generator = "Ninja" if shutil.which("ninja") else "Unix Makefiles"
     cmake_args = [
         "cmake",
-        "-G", "Ninja",
+        "-G", generator,
         "-S", str(llvm_src / "llvm"),
         "-B", str(llvm_build),
         "-DCMAKE_BUILD_TYPE=Release",
@@ -506,7 +508,7 @@ def main() -> None:
     git_clone_tag(cfg["linux_repo"], cfg["linux_tag"], linux_src)
     install_uapi_headers(linux_src, prefix / "sysroot/include")
 
-    # 4. musl 1.2.5 (`arch/wasm64`)
+    # 4. musl 1.2.5 (`arch/wasm64`) headers + compiler-rt + full static & shared (`libc.a` + `libc.so`)
     musl_src = sources / "musl"
     git_clone_tag(cfg["musl_repo"], cfg["musl_tag"], musl_src)
     apply_musl_port(musl_src)
@@ -527,17 +529,21 @@ def main() -> None:
             str(musl_src / "configure"),
             f"--target={TRIPLE}",
             f"--prefix={prefix / 'sysroot'}",
-            "--disable-shared",
+            f"--syslibdir={prefix / 'sysroot/lib'}",
+            "--enable-shared",
             "--disable-wrapper",
         ],
         cwd=musl_build,
         env=env,
     )
-    run(["make", f"-j{args.jobs}"], cwd=musl_build, env=env)
-    run(["make", "install"], cwd=musl_build, env=env)
+    run(["make", "install-headers"], cwd=musl_build, env=env)
 
-    # 5. compiler-rt builtins
+    # 5. compiler-rt builtins (built after musl headers so `libc.so` can link `LIBCC`)
     build_compiler_rt(llvm_src, prefix, work / "build-compiler-rt", args.jobs)
+
+    builtins_a = prefix / "sysroot/lib/libclang_rt.builtins-wasm64.a"
+    run(["make", f"-j{args.jobs}", f"LIBCC={builtins_a}"], cwd=musl_build, env=env)
+    run(["make", "install", f"LIBCC={builtins_a}"], cwd=musl_build, env=env)
 
     # 5b. Rust target spec & build-std helper
     rust_src_dir = TOOLCHAIN_DIR / "rust"

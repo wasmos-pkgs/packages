@@ -1,13 +1,13 @@
 [package]
 name = "sqlite"
 version = "3.49.1"
-rev = 0
+rev = 1
 kind = "dev"
-description = "SQLite 3.49.1 amalgamation static library and headers for wasm64-submilli-linux-musl"
+description = "SQLite 3.49.1 thread-safe shared and static libraries and headers for wasm64-submilli-linux-musl"
 license = "blessing"
 homepage = "https://www.sqlite.org/"
 build_deps = []
-runtime_deps = []
+runtime_deps = ["musl"]
 
 [source]
 url = "https://www.sqlite.org/2025/sqlite-autoconf-3490100.tar.gz"

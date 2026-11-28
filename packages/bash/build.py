@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Cross-compile GNU Bash 5.3 (+ GNU Readline 8.3) for `wasm64-submilli-linux-musl`
--> `$WASMOS_DESTDIR/bin/bash`.
+"""Cross-compile dynamic PIE GNU Bash 5.3 (+ GNU Readline 8.3) for
+`wasm64-submilli-linux-musl` -> `$WASMOS_DESTDIR/bin/bash`.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ TRIPLE = "wasm64-submilli-linux-musl"
 
 
 def main() -> None:
-    if not (SYSROOT / "lib/libncursesw.a").exists():
-        raise SystemExit(f"Missing {SYSROOT / 'lib/libncursesw.a'}; install ncurses build_dep first")
+    if not (SYSROOT / "lib/libncursesw.so").exists():
+        raise SystemExit(f"Missing {SYSROOT / 'lib/libncursesw.so'}; install ncurses build_dep first")
 
     for helper in ("config.sub", "config.guess", "mkversion.sh", "mksignames"):
         p = SRC / "support" / helper
@@ -40,7 +40,8 @@ def main() -> None:
     env["RANLIB"] = str(CROSS_BIN / f"{TRIPLE}-ranlib")
     env["STRIP"] = str(CROSS_BIN / f"{TRIPLE}-strip")
     env["CC_FOR_BUILD"] = host_cc
-    env["CFLAGS"] = "-O2"
+    env["CFLAGS"] = f"-O2 -I{SYSROOT / 'include'} -I{SYSROOT / 'include/ncursesw'}"
+    env["LDFLAGS"] = f"-L{SYSROOT / 'lib'} -Wl,-rpath,/usr/lib"
     env["CFLAGS_FOR_BUILD"] = "-O2 -std=gnu17 -Wno-implicit-function-declaration"
 
     cross_cache_vars = [
@@ -69,7 +70,6 @@ def main() -> None:
         "--bindir=/bin",
         "--without-bash-malloc",
         "--disable-nls",
-        "--enable-static-link",
         "--with-curses",
         "--enable-readline",
         "--enable-history",
@@ -105,11 +105,16 @@ def main() -> None:
         [
             str(CROSS_BIN / f"{TRIPLE}-strip"),
             "--strip-debug",
+            "--keep-section=dylink.0",
             "--keep-section=submilli.target",
+            "--keep-section=submilli.fork_exports",
+            "--keep-section=name",
             str(out_bin),
         ],
         check=True,
     )
+    if b"dylink.0" not in out_bin.read_bytes()[:256]:
+        raise SystemExit("Expected /bin/bash to contain a dylink.0 section (dynamic PIE)")
     out_bin.chmod(0o755)
     print(f"Built GNU Bash 5.3 -> {out_bin} ({out_bin.stat().st_size} bytes)", flush=True)
 

@@ -29,7 +29,7 @@ def ensure_rust_linker(toolchain: pathlib.Path) -> pathlib.Path:
     linker.write_text(
         f"""#!/bin/sh
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-exec "$DIR/llvm/bin/clang" "$@" --target={TRIPLE} --sysroot="$DIR/sysroot" "$DIR/sysroot/lib/libclang_rt.builtins-wasm64.a"
+exec "$DIR/llvm/bin/clang" -static "$@" --target={TRIPLE} --sysroot="$DIR/sysroot" "$DIR/sysroot/lib/libclang_rt.builtins-wasm64.a"
 """,
         encoding="utf-8",
     )

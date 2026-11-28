@@ -1,0 +1,13 @@
+[package]
+name = "musl"
+version = "1.2.5"
+rev = 0
+kind = "runtime"
+description = "musl 1.2.5 dynamic C library (libc.so / ld-musl-wasm64.so.1) for wasm64-submilli-linux-musl"
+license = "MIT"
+homepage = "https://musl.libc.org/"
+build_deps = []
+runtime_deps = []
+
+[source]
+builtin = true

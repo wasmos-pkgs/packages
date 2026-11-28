@@ -1,13 +1,13 @@
 [package]
 name = "bzip2"
 version = "1.0.8"
-rev = 0
+rev = 1
 kind = "dev"
-description = "bzip2 static compression library and headers for wasm64-submilli-linux-musl"
+description = "bzip2 shared and static compression libraries and headers for wasm64-submilli-linux-musl"
 license = "bzip2-1.0.6"
 homepage = "https://sourceware.org/bzip2/"
 build_deps = []
-runtime_deps = []
+runtime_deps = ["musl"]
 
 [source]
 url = "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz"

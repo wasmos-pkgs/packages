@@ -13,9 +13,9 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SYSCALL_IN = ROOT / "toolchain/sources/musl/arch/aarch64/bits/syscall.h.in"
+SYSCALL_IN = ROOT / "build/toolchain/sources/musl/arch/aarch64/bits/syscall.h.in"
 C_OUT = ROOT / "toolchain/musl-arch/wasm64/bits/wali_syscalls.h"
-RS_OUT = ROOT / "crates/abi/src/syscalls.rs"
+RS_OUT = ROOT / "toolchain/postlink/crates/abi/src/syscalls.rs"
 
 TYPED_SIGNATURES: dict[str, list[str]] = {
     "getcwd": ["i64", "i64"],
@@ -239,10 +239,14 @@ def emit_c_header(entries: list[tuple[str, int]]) -> None:
         "",
         '#define __WALI_IMPORT(name) __attribute__((__import_module__("wali"), __import_name__(name)))',
         "",
-        "/* Dedicated process/thread creation imports for static fork call-graph precision */",
+        "/* Dedicated process/thread/dlfcn imports */",
         '__WALI_IMPORT("SYS_fork") long __wali_sys_fork(void);',
         '__WALI_IMPORT("SYS_vfork") long __wali_sys_vfork(void);',
         '__WALI_IMPORT("SYS_thread_clone") long __wali_sys_thread_clone(long, long, long, long, long);',
+        '__WALI_IMPORT("SYS_dlopen") long __wali_sys_dlopen(long, int, long, long, long, long);',
+        '__WALI_IMPORT("SYS_dlsym") long __wali_sys_dlsym(long, long, long, long, long);',
+        '__WALI_IMPORT("SYS_dlclose") long __wali_sys_dlclose(long);',
+        '__WALI_IMPORT("SYS_dladdr") long __wali_sys_dladdr(long, long);',
         '__WALI_IMPORT("SYS__syscall") long __wali_sys_fallback(long, long, long, long, long, long, long);',
         "",
     ]
@@ -340,6 +344,30 @@ def emit_rust_module(entries: list[tuple[str, int]]) -> None:
         "        nr: None,",
         '        import_name: "SYS_thread_clone",',
         "        params: &[WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64],",
+        "        is_process_fork: false,",
+        "    },",
+        "    SyscallSpec {",
+        "        nr: None,",
+        '        import_name: "SYS_dlopen",',
+        "        params: &[WasmScalar::I64, WasmScalar::I32, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64],",
+        "        is_process_fork: false,",
+        "    },",
+        "    SyscallSpec {",
+        "        nr: None,",
+        '        import_name: "SYS_dlsym",',
+        "        params: &[WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64],",
+        "        is_process_fork: false,",
+        "    },",
+        "    SyscallSpec {",
+        "        nr: None,",
+        '        import_name: "SYS_dlclose",',
+        "        params: &[WasmScalar::I64],",
+        "        is_process_fork: false,",
+        "    },",
+        "    SyscallSpec {",
+        "        nr: None,",
+        '        import_name: "SYS_dladdr",',
+        "        params: &[WasmScalar::I64, WasmScalar::I64],",
         "        is_process_fork: false,",
         "    },",
         "    SyscallSpec {",

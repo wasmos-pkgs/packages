@@ -49,6 +49,30 @@ pub const SYSCALL_SPECS: &[SyscallSpec] = &[
     },
     SyscallSpec {
         nr: None,
+        import_name: "SYS_dlopen",
+        params: &[WasmScalar::I64, WasmScalar::I32, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64],
+        is_process_fork: false,
+    },
+    SyscallSpec {
+        nr: None,
+        import_name: "SYS_dlsym",
+        params: &[WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64],
+        is_process_fork: false,
+    },
+    SyscallSpec {
+        nr: None,
+        import_name: "SYS_dlclose",
+        params: &[WasmScalar::I64],
+        is_process_fork: false,
+    },
+    SyscallSpec {
+        nr: None,
+        import_name: "SYS_dladdr",
+        params: &[WasmScalar::I64, WasmScalar::I64],
+        is_process_fork: false,
+    },
+    SyscallSpec {
+        nr: None,
         import_name: "SYS__syscall",
         params: &[WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64, WasmScalar::I64],
         is_process_fork: false,

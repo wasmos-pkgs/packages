@@ -122,8 +122,25 @@ index 55748c0bc..914637847 100644
          TC = std::make_unique<toolchains::HexagonToolChain>(*this, Target,
                                                               Args);
        else if ((Target.getVendor() == llvm::Triple::MipsTechnologies) &&
+diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+index 626133223..a1f784fe5 100644
+--- a/clang/lib/Driver/ToolChains/Clang.cpp
++++ b/clang/lib/Driver/ToolChains/Clang.cpp
+@@ -2279,8 +2279,10 @@ void Clang::AddLanaiTargetArgs(const ArgList &Args,
+ 
+ void Clang::AddWebAssemblyTargetArgs(const ArgList &Args,
+                                      ArgStringList &CmdArgs) const {
+-  // Default to "hidden" visibility.
+-  if (!Args.hasArg(options::OPT_fvisibility_EQ,
++  // Default to "hidden" visibility except on Linux targets where ELF-compatible
++  // default visibility is expected by musl and shared libraries.
++  if (!getToolChain().getTriple().isOSLinux() &&
++      !Args.hasArg(options::OPT_fvisibility_EQ,
+                    options::OPT_fvisibility_ms_compat))
+     CmdArgs.push_back("-fvisibility=hidden");
+ }
 diff --git a/clang/lib/Driver/ToolChains/WebAssembly.cpp b/clang/lib/Driver/ToolChains/WebAssembly.cpp
-index 5054868b5..b869e3ac0 100644
+index 5054868b5..a94839113 100644
 --- a/clang/lib/Driver/ToolChains/WebAssembly.cpp
 +++ b/clang/lib/Driver/ToolChains/WebAssembly.cpp
 @@ -68,6 +68,12 @@ static bool TargetBuildsComponents(const llvm::Triple &TargetTriple) {
@@ -139,19 +156,84 @@ index 5054868b5..b869e3ac0 100644
    bool WantsPthread =
        Args.hasFlag(options::OPT_pthread, options::OPT_no_pthread, false);
  
-@@ -98,6 +104,11 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -98,6 +104,23 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
    if (Args.hasArg(options::OPT_s))
      CmdArgs.push_back("--strip-all");
  
-+  if (ToolChain.getTriple().isOSLinux() && !Args.hasArg(options::OPT_r)) {
++  bool IsLinux = ToolChain.getTriple().isOSLinux();
++  bool IsShared = Args.hasArg(options::OPT_shared);
++  bool IsRelocatable = Args.hasArg(options::OPT_r);
++  bool IsStatic = Args.hasArg(options::OPT_static) && !IsShared;
++  bool IsPIE = IsLinux && !IsShared && !IsStatic && !IsRelocatable &&
++               Args.hasFlag(options::OPT_pie, options::OPT_no_pie,
++                            ToolChain.isPIEDefault(Args));
++
++  if (IsLinux && !IsRelocatable) {
 +    CmdArgs.push_back("--submilli");
 +    CmdArgs.push_back("--keep-section=submilli.target");
++    if (IsShared || IsPIE)
++      CmdArgs.push_back("--experimental-pic");
++    if (Args.hasArg(options::OPT_rdynamic))
++      CmdArgs.push_back("--export-dynamic");
 +  }
 +
    // On `wasip2` the default linker is `wasm-component-ld` which wraps the
    // execution of `wasm-ld`. Find `wasm-ld` and pass it as an argument of where
    // to find it to avoid it needing to hunt and rediscover or search `PATH` for
-@@ -180,9 +191,11 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -113,12 +136,12 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+   ToolChain.AddFilePathLibArgs(Args, CmdArgs);
+ 
+   bool IsCommand = true;
+-  const char *Crt1;
++  const char *Crt1 = nullptr;
+   const char *Entry = nullptr;
+ 
+   // When -shared is specified, use the reactor exec model unless
+   // specified otherwise.
+-  if (Args.hasArg(options::OPT_shared))
++  if (IsShared)
+     IsCommand = false;
+ 
+   if (const Arg *A = Args.getLastArg(options::OPT_mexec_model_EQ)) {
+@@ -133,7 +156,14 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     }
+   }
+ 
+-  if (IsCommand) {
++  if (IsLinux) {
++    if (!IsShared && !IsRelocatable) {
++      if (IsPIE && ToolChain.GetFilePath("Scrt1.o") != "Scrt1.o")
++        Crt1 = "Scrt1.o";
++      else
++        Crt1 = "crt1.o";
++    }
++  } else if (IsCommand) {
+     // If crt1-command.o exists, it supports new-style commands, so use it.
+     // Otherwise, use the old crt1.o. This is a temporary transition measure.
+     // Once WASI libc no longer needs to support LLVM versions which lack
+@@ -148,15 +178,19 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     Entry = "_initialize";
+   }
+ 
+-  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles))
++  if (Crt1 && !Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles))
+     CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath(Crt1)));
+   if (Entry) {
+     CmdArgs.push_back(Args.MakeArgString("--entry"));
+     CmdArgs.push_back(Args.MakeArgString(Entry));
+   }
+ 
+-  if (Args.hasArg(options::OPT_shared))
++  if (IsShared)
+     CmdArgs.push_back(Args.MakeArgString("-shared"));
++  else if (IsPIE)
++    CmdArgs.push_back(Args.MakeArgString("-pie"));
++  else if (IsLinux && IsStatic && !IsRelocatable)
++    CmdArgs.push_back(Args.MakeArgString("-Bstatic"));
+ 
+   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
+ 
+@@ -180,9 +214,11 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
    CmdArgs.push_back(Output.getFilename());
  
    // Don't use wasm-opt by default on `wasip2` as it doesn't have support for
@@ -166,17 +248,24 @@ index 5054868b5..b869e3ac0 100644
    bool RunWasmOpt = Args.hasFlag(options::OPT_wasm_opt,
                                   options::OPT_no_wasm_opt, WasmOptDefault);
  
-@@ -228,6 +241,21 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -228,6 +264,28 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
        }
      }
    }
 +
-+  if (ToolChain.getTriple().isOSLinux() && !Args.hasArg(options::OPT_r) &&
-+      !Args.hasArg(options::OPT_shared)) {
++  if (IsLinux && !IsRelocatable) {
 +    std::string PostLinkPath = ToolChain.GetProgramPath("wasmos-postlink");
 +    if (PostLinkPath != "wasmos-postlink") {
 +      const char *PostLink = Args.MakeArgString(PostLinkPath);
 +      ArgStringList PostArgs;
++      for (const Arg *A : Args.filtered(options::OPT_L)) {
++        PostArgs.push_back("-L");
++        PostArgs.push_back(A->getValue());
++      }
++      for (const std::string &Path : ToolChain.getFilePaths()) {
++        PostArgs.push_back("-L");
++        PostArgs.push_back(Args.MakeArgString(Path));
++      }
 +      PostArgs.push_back(Output.getFilename());
 +      PostArgs.push_back("-o");
 +      PostArgs.push_back(Output.getFilename());
@@ -188,7 +277,7 @@ index 5054868b5..b869e3ac0 100644
  }
  
  /// Given a base library directory, append path components to form the
-@@ -264,6 +292,8 @@ WebAssembly::WebAssembly(const Driver &D, const llvm::Triple &Triple,
+@@ -264,6 +322,8 @@ WebAssembly::WebAssembly(const Driver &D, const llvm::Triple &Triple,
        getFilePaths().push_back(Dir);
      }
      getFilePaths().push_back(SysRoot + "/lib/" + MultiarchTriple);
@@ -197,7 +286,17 @@ index 5054868b5..b869e3ac0 100644
    }
  }
  
-@@ -449,6 +479,46 @@ void WebAssembly::addClangTargetOptions(const ArgList &DriverArgs,
+@@ -282,7 +342,8 @@ bool WebAssembly::UseObjCMixedDispatch() const { return true; }
+ bool WebAssembly::isPICDefault() const { return false; }
+ 
+ bool WebAssembly::isPIEDefault(const llvm::opt::ArgList &Args) const {
+-  return false;
++  return getTriple().isOSLinux() &&
++         !Args.hasArg(options::OPT_static, options::OPT_no_pie);
+ }
+ 
+ bool WebAssembly::isPICDefaultForced() const { return false; }
+@@ -449,6 +510,46 @@ void WebAssembly::addClangTargetOptions(const ArgList &DriverArgs,
        }
      }
    }
@@ -258,10 +357,18 @@ index f883338c4..fa1629fc1 100644
  typedef int CMP_RESULT;
  #elif __SIZEOF_POINTER__ == 8 && __SIZEOF_LONG__ == 4
 diff --git a/lld/wasm/Config.h b/lld/wasm/Config.h
-index 9d903e0c7..50713e3b5 100644
+index 9d903e0c7..38d271acf 100644
 --- a/lld/wasm/Config.h
 +++ b/lld/wasm/Config.h
-@@ -67,6 +67,8 @@ struct Config {
+@@ -30,6 +30,7 @@ class SharedFile;
+ class BitcodeFile;
+ class InputTable;
+ class InputGlobal;
++class InputTag;
+ class InputFunction;
+ class Symbol;
+ class DefinedData;
+@@ -67,6 +68,8 @@ struct Config {
    std::optional<std::pair<llvm::StringRef, llvm::StringRef>> memoryImport;
    std::optional<llvm::StringRef> memoryExport;
    bool sharedMemory;
@@ -270,11 +377,38 @@ index 9d903e0c7..50713e3b5 100644
    bool importTable;
    bool importUndefined;
    std::optional<bool> is64;
+@@ -144,6 +147,7 @@ struct Ctx {
+   llvm::SmallVector<BitcodeFile *, 0> lazyBitcodeFiles;
+   llvm::SmallVector<InputFunction *, 0> syntheticFunctions;
+   llvm::SmallVector<InputGlobal *, 0> syntheticGlobals;
++  llvm::SmallVector<InputTag *, 0> syntheticTags;
+   llvm::SmallVector<InputTable *, 0> syntheticTables;
+ 
+   // linker-generated symbols
 diff --git a/lld/wasm/Driver.cpp b/lld/wasm/Driver.cpp
-index 1c5d21c06..a1d218065 100644
+index 1c5d21c06..4161fee04 100644
 --- a/lld/wasm/Driver.cpp
 +++ b/lld/wasm/Driver.cpp
-@@ -560,6 +560,7 @@ static void readConfigs(opt::InputArgList &args) {
+@@ -64,6 +64,7 @@ void Ctx::reset() {
+   lazyBitcodeFiles.clear();
+   syntheticFunctions.clear();
+   syntheticGlobals.clear();
++  syntheticTags.clear();
+   syntheticTables.clear();
+   whyExtractRecords.clear();
+   isPic = false;
+@@ -490,6 +491,10 @@ static UnresolvedPolicy getUnresolvedSymbolPolicy(opt::InputArgList &args) {
+     error("unknown --unresolved-symbols value: " + s);
+   }
+ 
++  if (args.hasArg(OPT_submilli) && args.hasArg(OPT_shared) &&
++      !hasZOption(args, "defs"))
++    return UnresolvedPolicy::ImportDynamic;
++
+   return errorOrWarn;
+ }
+ 
+@@ -560,6 +565,7 @@ static void readConfigs(opt::InputArgList &args) {
    }
  
    ctx.arg.sharedMemory = args.hasArg(OPT_shared_memory);
@@ -282,7 +416,17 @@ index 1c5d21c06..a1d218065 100644
    ctx.arg.soName = args.getLastArgValue(OPT_soname);
    ctx.arg.importTable = args.hasArg(OPT_import_table);
    ctx.arg.importUndefined = args.hasArg(OPT_import_undefined);
-@@ -638,8 +639,10 @@ static void readConfigs(opt::InputArgList &args) {
+@@ -593,7 +599,8 @@ static void readConfigs(opt::InputArgList &args) {
+   ctx.arg.saveTemps = args.hasArg(OPT_save_temps);
+   ctx.arg.searchPaths = args::getStrings(args, OPT_library_path);
+   ctx.arg.shared = args.hasArg(OPT_shared);
+-  ctx.arg.shlibSigCheck = !args.hasArg(OPT_no_shlib_sigcheck);
++  ctx.arg.shlibSigCheck =
++      !args.hasArg(OPT_no_shlib_sigcheck) && !ctx.arg.submilli;
+   ctx.arg.stripAll = args.hasArg(OPT_strip_all);
+   ctx.arg.stripDebug = args.hasArg(OPT_strip_debug);
+   ctx.arg.stackFirst = args.hasArg(OPT_stack_first);
+@@ -638,8 +645,10 @@ static void readConfigs(opt::InputArgList &args) {
    ctx.arg.initialMemory = args::getInteger(args, OPT_initial_memory, 0);
    ctx.arg.maxMemory = args::getInteger(args, OPT_max_memory, 0);
    ctx.arg.noGrowableMemory = args.hasArg(OPT_no_growable_memory);
@@ -294,7 +438,22 @@ index 1c5d21c06..a1d218065 100644
    ctx.arg.pageSize = args::getInteger(args, OPT_page_size, WasmDefaultPageSize);
    if (ctx.arg.pageSize != 1 && ctx.arg.pageSize != WasmDefaultPageSize)
      error("--page_size=N must be either 1 or 65536");
-@@ -714,6 +717,9 @@ static void readConfigs(opt::InputArgList &args) {
+@@ -653,9 +662,11 @@ static void readConfigs(opt::InputArgList &args) {
+     error("--max-memory is incompatible with --no-growable-memory");
+   }
+ 
+-  // Default value of exportDynamic depends on `-shared`
+-  ctx.arg.exportDynamic =
+-      args.hasFlag(OPT_export_dynamic, OPT_no_export_dynamic, ctx.arg.shared);
++  // Default value of exportDynamic depends on `-shared` (and `-pie` on submilli
++  // so dlopen'd modules can bind against symbols in the main PIE executable).
++  ctx.arg.exportDynamic = args.hasFlag(
++      OPT_export_dynamic, OPT_no_export_dynamic,
++      ctx.arg.shared || (ctx.arg.submilli && ctx.arg.pie));
+ 
+   // Parse wasm32/64.
+   if (auto *arg = args.getLastArg(OPT_m)) {
+@@ -714,6 +725,9 @@ static void readConfigs(opt::InputArgList &args) {
  // This function initialize such members. See Config.h for the details
  // of these values.
  static void setConfigs() {
@@ -304,7 +463,7 @@ index 1c5d21c06..a1d218065 100644
    ctx.isPic = ctx.arg.pie || ctx.arg.shared;
  
    if (ctx.isPic) {
-@@ -722,15 +728,16 @@ static void setConfigs() {
+@@ -722,15 +736,16 @@ static void setConfigs() {
      ctx.arg.importTable = true;
    } else {
      // Default table base.  Defaults to 1, reserving 0 for the NULL function
@@ -325,29 +484,53 @@ index 1c5d21c06..a1d218065 100644
    }
  
    if (ctx.arg.relocatable) {
-@@ -752,6 +759,21 @@ static void setConfigs() {
+@@ -752,6 +767,29 @@ static void setConfigs() {
      }
    }
  
-+  if (ctx.arg.submilli && !ctx.arg.shared &&
-+      !ctx.arg.memoryExport.has_value() && !ctx.arg.memoryImport.has_value()) {
++  if (ctx.arg.submilli && !ctx.arg.relocatable &&
++      !ctx.arg.memoryExport.has_value() &&
++      (!ctx.arg.memoryImport.has_value() ||
++       (ctx.arg.shared && ctx.arg.memoryImport->first == defaultModule &&
++        ctx.arg.memoryImport->second == memoryName))) {
 +    ctx.arg.memoryImport =
 +        std::pair<llvm::StringRef, llvm::StringRef>("submilli", memoryName);
 +  }
 +
-+  if (ctx.arg.submilli && !ctx.arg.shared) {
-+    ctx.arg.exportedSymbols.insert("__stack_pointer");
++  if (ctx.arg.submilli && !ctx.arg.relocatable) {
 +    ctx.arg.exportedSymbols.insert("__tls_base");
++    ctx.arg.exportedSymbols.insert("__tls_size");
++    ctx.arg.exportedSymbols.insert("__tls_align");
 +    ctx.arg.exportedSymbols.insert("__wasm_init_tls");
-+    ctx.arg.exportedSymbols.insert("__submilli_thread_start");
-+    ctx.arg.exportedSymbols.insert("__submilli_signal_deliver");
-+    ctx.arg.exportedSymbols.insert("__submilli_kernel_block");
++    ctx.arg.exportedSymbols.insert("__wasm_call_ctors");
++    if (!ctx.isPic) {
++      ctx.arg.exportedSymbols.insert("__stack_pointer");
++      ctx.arg.exportedSymbols.insert("__submilli_thread_start");
++      ctx.arg.exportedSymbols.insert("__submilli_signal_deliver");
++      ctx.arg.exportedSymbols.insert("__submilli_kernel_block");
++    }
 +  }
 +
    // If neither export-memory nor import-memory is specified, default to
    // exporting memory under its default name.
    if (!ctx.arg.memoryExport.has_value() && !ctx.arg.memoryImport.has_value()) {
-@@ -968,7 +990,7 @@ static void createSyntheticSymbols() {
+@@ -962,13 +1000,23 @@ static void createSyntheticSymbols() {
+     ctx.sym.tableBase = createUndefinedGlobal("__table_base", globalType);
+     ctx.sym.memoryBase->markLive();
+     ctx.sym.tableBase->markLive();
++    if (ctx.arg.submilli) {
++      auto *kbSym = cast<UndefinedGlobal>(symtab->addUndefinedGlobal(
++          "__kernel_block", "__kernel_block", "submilli", WASM_SYMBOL_UNDEFINED,
++          nullptr, is64 ? &mutableGlobalTypeI64 : &mutableGlobalTypeI32));
++      ctx.arg.allowUndefinedSymbols.insert(kbSym->getName());
++      kbSym->isUsedInRegularObj = true;
++      kbSym->markLive();
++      ctx.arg.allowUndefinedSymbols.insert("__c_longjmp");
++      ctx.arg.allowUndefinedSymbols.insert("__cpp_exception");
++    }
+   } else {
+     // For non-PIC code
+     ctx.sym.stackPointer = createGlobalVariable("__stack_pointer", true);
      ctx.sym.stackPointer->markLive();
    }
  
@@ -356,7 +539,48 @@ index 1c5d21c06..a1d218065 100644
      ctx.sym.tlsBase = createGlobalVariable("__tls_base", true);
      ctx.sym.tlsSize = createGlobalVariable("__tls_size", false);
      ctx.sym.tlsAlign = createGlobalVariable("__tls_align", false);
-@@ -1011,7 +1033,7 @@ static void createOptionalSymbols() {
+@@ -994,8 +1042,38 @@ static void createOptionalSymbols() {
+     ctx.sym.globalBase = symtab->addOptionalDataSymbol("__global_base");
+     ctx.sym.heapBase = symtab->addOptionalDataSymbol("__heap_base");
+     ctx.sym.heapEnd = symtab->addOptionalDataSymbol("__heap_end");
+-    ctx.sym.definedMemoryBase = symtab->addOptionalDataSymbol("__memory_base");
+-    ctx.sym.definedTableBase = symtab->addOptionalDataSymbol("__table_base");
++    if (auto *ug =
++            dyn_cast_or_null<UndefinedGlobal>(symtab->find("__memory_base"))) {
++      InputGlobal *g = createGlobal("__memory_base", false);
++      g->setPointerValue(0);
++      replaceSymbol<DefinedGlobal>(ug, "__memory_base",
++                                   WASM_SYMBOL_VISIBILITY_HIDDEN, nullptr, g);
++      ctx.syntheticGlobals.emplace_back(g);
++    } else {
++      ctx.sym.definedMemoryBase = symtab->addOptionalDataSymbol("__memory_base");
++    }
++    if (auto *ug =
++            dyn_cast_or_null<UndefinedGlobal>(symtab->find("__table_base"))) {
++      InputGlobal *g = createGlobal("__table_base", false);
++      g->setPointerValue(ctx.arg.tableBase);
++      replaceSymbol<DefinedGlobal>(ug, "__table_base",
++                                   WASM_SYMBOL_VISIBILITY_HIDDEN, nullptr, g);
++      ctx.syntheticGlobals.emplace_back(g);
++    } else {
++      ctx.sym.definedTableBase = symtab->addOptionalDataSymbol("__table_base");
++    }
++    for (const char *tagName : {"__c_longjmp", "__cpp_exception"}) {
++      if (auto *ut = dyn_cast_or_null<UndefinedTag>(symtab->find(tagName))) {
++        WasmTag wasmTag{};
++        wasmTag.SymbolName = tagName;
++        auto *sig = make<WasmSignature>(*ut->signature);
++        sig->Kind = WasmSignature::Tag;
++        InputTag *t = make<InputTag>(*sig, wasmTag, nullptr);
++        replaceSymbol<DefinedTag>(ut, tagName, WASM_SYMBOL_VISIBILITY_HIDDEN,
++                                  nullptr, t);
++        ctx.syntheticTags.emplace_back(t);
++      }
++    }
+   }
+ 
+   ctx.sym.firstPageEnd = symtab->addOptionalDataSymbol("__wasm_first_page_end");
+@@ -1011,7 +1089,7 @@ static void createOptionalSymbols() {
    //
    // __tls_size and __tls_align are not needed in this case since they are only
    // needed for __wasm_init_tls (which we do not create in this case).
@@ -365,7 +589,7 @@ index 1c5d21c06..a1d218065 100644
      ctx.sym.tlsBase = createOptionalGlobal("__tls_base", false);
  }
  
-@@ -1254,7 +1276,11 @@ static void splitSections() {
+@@ -1254,7 +1332,11 @@ static void splitSections() {
  
  static bool isKnownZFlag(StringRef s) {
    // For now, we only support a very limited set of -z flags
@@ -378,11 +602,53 @@ index 1c5d21c06..a1d218065 100644
  }
  
  // Report a warning for an unknown -z option.
+diff --git a/lld/wasm/InputFiles.cpp b/lld/wasm/InputFiles.cpp
+index 387b5eb10..049fa45fd 100644
+--- a/lld/wasm/InputFiles.cpp
++++ b/lld/wasm/InputFiles.cpp
+@@ -441,6 +441,8 @@ void SharedFile::parse() {
+       // TODO(sbc): Instead of hardcoding these here perhaps we could add
+       // this as extra metadata in the `dylink` section.
+       if (name == "__wasm_apply_data_relocs" || name == "__wasm_call_ctors" ||
++          name == "__wasm_init_tls" ||
++          name == "__wasm_apply_global_tls_relocs" ||
+           name.starts_with("__start_") || name.starts_with("__stop_"))
+         continue;
+       uint32_t flags = wasmSym.Info.Flags;
+@@ -707,6 +709,14 @@ Symbol *ObjFile::createDefined(const WasmSymbol &sym) {
+     InputTag *tag = tags[sym.Info.ElementIndex - wasmObj->getNumImportedTags()];
+     if (sym.isBindingLocal())
+       return make<DefinedTag>(name, flags, this, tag);
++    if (ctx.isPic && !sym.isHidden()) {
++      tag->live = false;
++      uint32_t undefFlags =
++          (flags & ~WASM_SYMBOL_BINDING_MASK) | WASM_SYMBOL_UNDEFINED;
++      return symtab->addUndefinedTag(name, sym.Info.ImportName,
++                                     sym.Info.ImportModule, undefFlags, this,
++                                     &tag->signature);
++    }
+     return symtab->addDefinedTag(name, flags, this, tag);
+   }
+   case WASM_SYMBOL_TYPE_TABLE: {
+diff --git a/lld/wasm/MarkLive.cpp b/lld/wasm/MarkLive.cpp
+index 2b2cf19f1..a20ee7c3b 100644
+--- a/lld/wasm/MarkLive.cpp
++++ b/lld/wasm/MarkLive.cpp
+@@ -199,6 +199,9 @@ void markLive() {
+     for (InputGlobal *g : ctx.syntheticGlobals)
+       if (!g->live)
+         message("removing unused section " + toString(g));
++    for (InputTag *t : ctx.syntheticTags)
++      if (!t->live)
++        message("removing unused section " + toString(t));
+     for (InputTable *t : ctx.syntheticTables)
+       if (!t->live)
+         message("removing unused section " + toString(t));
 diff --git a/lld/wasm/Options.td b/lld/wasm/Options.td
-index 2f699e2f6..acd19a308 100644
+index 2f699e2f6..41499e33c 100644
 --- a/lld/wasm/Options.td
 +++ b/lld/wasm/Options.td
-@@ -224,6 +224,28 @@ def export_memory_with_name: JJ<"export-memory=">,
+@@ -224,7 +224,34 @@ def export_memory_with_name: JJ<"export-memory=">,
  def shared_memory: FF<"shared-memory">,
    HelpText<"Use shared linear memory">;
  
@@ -407,10 +673,16 @@ index 2f699e2f6..acd19a308 100644
 +defm hash_style: Eq<"hash-style", "Ignored for GNU ld compatibility">;
 +defm dynamic_linker: Eq<"dynamic-linker", "Ignored for GNU ld compatibility">;
 +defm version_script: Eq<"version-script", "Ignored for GNU ld compatibility">;
++defm rpath_link: Eq<"rpath-link", "Ignored for GNU ld compatibility">;
++def enable_new_dtags: F<"enable-new-dtags">, HelpText<"Ignored for GNU ld compatibility">;
++def disable_new_dtags: F<"disable-new-dtags">, HelpText<"Ignored for GNU ld compatibility">;
++def Bsymbolic_functions: F<"Bsymbolic-functions">, HelpText<"Ignored for GNU ld compatibility">;
 +
  defm soname: Eq<"soname", "Set the module name in the generated name section">;
++def: JoinedOrSeparate<["-"], "h">, Alias<soname>, HelpText<"Alias for --soname">;
  
  def import_table: FF<"import-table">,
+   HelpText<"Import function table from the environment">;
 diff --git a/lld/wasm/OutputSections.cpp b/lld/wasm/OutputSections.cpp
 index 8ccd38f78..9f6cc801d 100644
 --- a/lld/wasm/OutputSections.cpp
@@ -438,9 +710,18 @@ index 52888ad25..a174eb9a4 100644
            error(toString(file) + ": relocation " +
                  relocTypeToString(reloc.Type) +
 diff --git a/lld/wasm/SyntheticSections.cpp b/lld/wasm/SyntheticSections.cpp
-index e1192706e..627c7ec34 100644
+index e1192706e..cf3d5a7ea 100644
 --- a/lld/wasm/SyntheticSections.cpp
 +++ b/lld/wasm/SyntheticSections.cpp
+@@ -432,7 +432,7 @@ void GlobalSection::addInternalGOTEntry(Symbol *sym) {
+ }
+ 
+ void GlobalSection::generateRelocationCode(raw_ostream &os, bool TLS) const {
+-  assert(!ctx.arg.extendedConst);
++  assert(TLS || !ctx.arg.extendedConst);
+   bool is64 = ctx.arg.is64.value_or(false);
+   unsigned opcode_ptr_const = is64 ? WASM_OPCODE_I64_CONST
+                                    : WASM_OPCODE_I32_CONST;
 @@ -494,7 +494,7 @@ void GlobalSection::writeBody() {
          mutable_ = true;
        // With multi-theadeding any TLS globals must be mutable since they get
@@ -482,7 +763,7 @@ index e1192706e..627c7ec34 100644
  
  void LinkingSection::writeBody() {
 diff --git a/lld/wasm/SyntheticSections.h b/lld/wasm/SyntheticSections.h
-index 068fbed11..dfdfa8c65 100644
+index 068fbed11..bcaff86b6 100644
 --- a/lld/wasm/SyntheticSections.h
 +++ b/lld/wasm/SyntheticSections.h
 @@ -467,6 +467,16 @@ private:
@@ -494,7 +775,7 @@ index 068fbed11..dfdfa8c65 100644
 +  SubmilliTargetSection()
 +      : SyntheticSection(llvm::wasm::WASM_SEC_CUSTOM, "submilli.target") {}
 +  bool isNeeded() const override {
-+    return ctx.arg.submilli && !ctx.arg.relocatable && !ctx.arg.shared;
++    return ctx.arg.submilli && !ctx.arg.relocatable;
 +  }
 +  void writeBody() override;
 +};
@@ -511,7 +792,7 @@ index 068fbed11..dfdfa8c65 100644
  };
  
 diff --git a/lld/wasm/Writer.cpp b/lld/wasm/Writer.cpp
-index b704677d3..cd380fd44 100644
+index b704677d3..6e7050419 100644
 --- a/lld/wasm/Writer.cpp
 +++ b/lld/wasm/Writer.cpp
 @@ -142,7 +142,8 @@ void Writer::calculateCustomSections() {
@@ -576,7 +857,17 @@ index b704677d3..cd380fd44 100644
    }
  
    // Validate that used features are allowed in output
-@@ -1015,7 +1021,7 @@ static StringRef getOutputDataSegmentName(const InputChunk &seg) {
+@@ -975,6 +981,9 @@ void Writer::assignIndexes() {
+       out.globalSec->addGlobal(global);
+   }
+ 
++  for (InputTag *tag : ctx.syntheticTags)
++    out.tagSec->addTag(tag);
++
+   for (ObjFile *file : ctx.objectFiles) {
+     LLVM_DEBUG(dbgs() << "Tags: " << file->getName() << "\n");
+     for (InputTag *tag : file->tags)
+@@ -1015,7 +1024,7 @@ static StringRef getOutputDataSegmentName(const InputChunk &seg) {
  OutputSegment *Writer::createOutputSegment(StringRef name) {
    LLVM_DEBUG(dbgs() << "new segment: " << name << "\n");
    OutputSegment *s = make<OutputSegment>(name);
@@ -585,7 +876,7 @@ index b704677d3..cd380fd44 100644
      s->initFlags = WASM_DATA_SEGMENT_IS_PASSIVE;
    if (!ctx.arg.relocatable && name.starts_with(".bss"))
      s->isBss = true;
-@@ -1074,7 +1080,7 @@ void Writer::combineOutputSegments() {
+@@ -1074,7 +1083,7 @@ void Writer::combineOutputSegments() {
    // This restriction does not apply when the extended const extension is
    // available: https://github.com/WebAssembly/extended-const
    assert(!ctx.arg.extendedConst);
@@ -594,7 +885,7 @@ index b704677d3..cd380fd44 100644
    if (segments.size() <= 1)
      return;
    OutputSegment *combined = make<OutputSegment>(".data");
-@@ -1149,14 +1155,14 @@ void Writer::createSyntheticInitFunctions() {
+@@ -1149,20 +1158,26 @@ void Writer::createSyntheticInitFunctions() {
          "__wasm_init_memory", WASM_SYMBOL_VISIBILITY_HIDDEN,
          make<SyntheticFunction>(nullSignature, "__wasm_init_memory"));
      ctx.sym.initMemory->markLive();
@@ -610,9 +901,22 @@ index b704677d3..cd380fd44 100644
 -  if (ctx.arg.sharedMemory) {
 +  if (ctx.arg.hasPassiveTLS()) {
      if (out.globalSec->needsTLSRelocations()) {
++      uint32_t gflags = ctx.arg.submilli
++                            ? (WASM_SYMBOL_VISIBILITY_DEFAULT |
++                               WASM_SYMBOL_EXPORTED)
++                            : WASM_SYMBOL_VISIBILITY_HIDDEN;
        ctx.sym.applyGlobalTLSRelocs = symtab->addSyntheticFunction(
-           "__wasm_apply_global_tls_relocs", WASM_SYMBOL_VISIBILITY_HIDDEN,
-@@ -1205,7 +1211,7 @@ void Writer::createInitMemoryFunction() {
+-          "__wasm_apply_global_tls_relocs", WASM_SYMBOL_VISIBILITY_HIDDEN,
++          "__wasm_apply_global_tls_relocs", gflags,
+           make<SyntheticFunction>(nullSignature,
+                                   "__wasm_apply_global_tls_relocs"));
+       ctx.sym.applyGlobalTLSRelocs->markLive();
++      if (ctx.arg.submilli)
++        ctx.sym.applyGlobalTLSRelocs->forceExport = true;
+       // TLS relocations depend on  the __tls_base symbols
+       ctx.sym.tlsBase->markLive();
+     }
+@@ -1205,7 +1220,7 @@ void Writer::createInitMemoryFunction() {
    assert(ctx.sym.initMemory);
    assert(hasPassiveInitializedSegments());
    uint64_t flagAddress;
@@ -621,7 +925,7 @@ index b704677d3..cd380fd44 100644
      assert(ctx.sym.initMemoryFlag);
      flagAddress = ctx.sym.initMemoryFlag->getVA();
    }
-@@ -1314,6 +1320,36 @@ void Writer::createInitMemoryFunction() {
+@@ -1314,6 +1329,36 @@ void Writer::createInitMemoryFunction() {
  
        // Initialize passive data segments
        writeU8(os, WASM_OPCODE_END, "end $init");
@@ -658,7 +962,7 @@ index b704677d3..cd380fd44 100644
      } else {
        writeUleb128(os, 0, "num local decls");
      }
-@@ -1336,7 +1372,7 @@ void Writer::createInitMemoryFunction() {
+@@ -1336,7 +1381,7 @@ void Writer::createInitMemoryFunction() {
          // When we initialize the TLS segment we also set the `__tls_base`
          // global.  This allows the runtime to use this static copy of the
          // TLS data for the first/main thread.
@@ -667,11 +971,21 @@ index b704677d3..cd380fd44 100644
            if (ctx.isPic) {
              // Cache the result of the addionion in local 0
              writeU8(os, WASM_OPCODE_LOCAL_TEE, "local.tee");
-@@ -1402,13 +1438,15 @@ void Writer::createInitMemoryFunction() {
+@@ -1402,13 +1447,25 @@ void Writer::createInitMemoryFunction() {
  
        // Unconditionally drop passive data segments
        writeU8(os, WASM_OPCODE_END, "end $drop");
 +    } else if (ctx.arg.submilli) {
++      if (ctx.sym.applyTLSRelocs) {
++        writeU8(os, WASM_OPCODE_CALL, "CALL");
++        writeUleb128(os, ctx.sym.applyTLSRelocs->getFunctionIndex(),
++                     "function index");
++      }
++      if (ctx.sym.applyGlobalTLSRelocs) {
++        writeU8(os, WASM_OPCODE_CALL, "CALL");
++        writeUleb128(os, ctx.sym.applyGlobalTLSRelocs->getFunctionIndex(),
++                     "function index");
++      }
 +      writeU8(os, WASM_OPCODE_END, "end $drop");
      }
  
@@ -684,7 +998,7 @@ index b704677d3..cd380fd44 100644
            continue;
          // data.drop instruction
          writeU8(os, WASM_OPCODE_MISC_PREFIX, "bulk-memory prefix");
-@@ -1461,7 +1499,7 @@ void Writer::createApplyDataRelocationsFunction() {
+@@ -1461,7 +1518,7 @@ void Writer::createApplyDataRelocationsFunction() {
      writeUleb128(os, 0, "num locals");
      bool generated = false;
      for (const OutputSegment *seg : segments)
@@ -693,7 +1007,7 @@ index b704677d3..cd380fd44 100644
          for (const InputChunk *inSeg : seg->inputSegments)
            generated |= inSeg->generateRelocationCode(os);
  
-@@ -1695,6 +1733,7 @@ void Writer::createSyntheticSections() {
+@@ -1695,6 +1752,7 @@ void Writer::createSyntheticSections() {
    out.elemSec = make<ElemSection>();
    out.producersSec = make<ProducersSection>();
    out.targetFeaturesSec = make<TargetFeaturesSection>();
@@ -701,7 +1015,7 @@ index b704677d3..cd380fd44 100644
    out.buildIdSec = make<BuildIdSection>();
  }
  
-@@ -1750,7 +1789,7 @@ void Writer::run() {
+@@ -1750,7 +1808,7 @@ void Writer::run() {
    // `__memory_base` import.  Unless we support the extended const expression we
    // can't do addition inside the constant expression, so we much combine the
    // segments into a single one that can live at `__memory_base`.
@@ -710,7 +1024,7 @@ index b704677d3..cd380fd44 100644
      // In shared memory mode all data segments are passive and initialized
      // via __wasm_init_memory.
      log("-- combineOutputSegments");
-@@ -1797,7 +1836,7 @@ void Writer::run() {
+@@ -1797,7 +1855,7 @@ void Writer::run() {
      // If the input contains a call to `__wasm_call_ctors`, either in one of
      // the input objects or an explicit export from the command-line, we
      // assume ctors and dtors are taken care of already.
