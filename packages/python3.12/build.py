@@ -31,13 +31,14 @@ def patch_cpython_source(py_src: pathlib.Path) -> None:
             config_sub.write_text(text.replace("wasm32", "wasm32 | wasm64"), encoding="utf-8")
 
     # CPython 3.12 embeds the platform triplet detection directly inside `configure`
+    # (outputs the bare triplet token, without 3.13+'s `PLATFORM_TRIPLET=` prefix).
     configure_sh = py_src / "configure"
     cfg_text = configure_sh.read_text(encoding="utf-8")
-    if "PLATFORM_TRIPLET=wasm64-linux-musl" not in cfg_text:
+    if "wasm64-linux-musl" not in cfg_text:
         target = "#elif defined(__linux__)\n"
         addition = (
             "#elif defined(__wasm64__) && defined(__linux__)\n"
-            "PLATFORM_TRIPLET=wasm64-linux-musl\n"
+            "wasm64-linux-musl\n"
             "#elif defined(__linux__)\n"
         )
         if target not in cfg_text:
