@@ -59,6 +59,7 @@ def main() -> None:
         "--",
         "build",
         "--release",
+        "--ignore-rust-version",
         "--manifest-path",
         str(SRC / "Cargo.toml"),
         "--target-dir",
