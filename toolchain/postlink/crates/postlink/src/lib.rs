@@ -98,6 +98,7 @@ struct ModuleInfo {
     imported_kb_global: Option<u32>,
     has_dylink: bool,
     has_imported_table: bool,
+    has_defined_table: bool,
     defines_libc_start_main: bool,
     exported_funcs: Vec<(String, u32)>,
     dylink_needed: Vec<String>,
@@ -360,6 +361,11 @@ fn analyze_module(
             Payload::FunctionSection(reader) => {
                 for ty in reader {
                     info.defined_func_types.push(ty?);
+                }
+            }
+            Payload::TableSection(reader) => {
+                if reader.count() > 0 {
+                    info.has_defined_table = true;
                 }
             }
             Payload::GlobalSection(reader) => {
@@ -2690,7 +2696,7 @@ impl<'m> Reencode for ForkRewriter<'m> {
             let _ = ExportKind::Func;
             exports.export(export.name, kind, index);
         }
-        if !has_table_export && !self.info.has_imported_table {
+        if !has_table_export && !self.info.has_imported_table && self.info.has_defined_table {
             exports.export("__indirect_function_table", ExportKind::Table, 0);
         }
         Ok(())
