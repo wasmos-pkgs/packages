@@ -1,0 +1,15 @@
+[package]
+name = "git"
+version = "2.56.1"
+rev = 0
+kind = "runtime"
+description = "Git 2.56.1 distributed version control system with HTTPS transport (libcurl + OpenSSL + zlib) for wasm64-submilli-linux-musl"
+license = "GPL-2.0-only"
+homepage = "https://git-scm.com/"
+build_deps = ["zlib", "openssl", "curl"]
+runtime_deps = ["musl", "zlib", "openssl", "curl"]
+
+[source]
+url = "https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.56.1.tar.xz"
+sha256 = "f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f"
+strip_components = 1

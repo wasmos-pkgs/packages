@@ -1,0 +1,15 @@
+[package]
+name = "ripgrep"
+version = "16.0.0"
+rev = 0
+kind = "runtime"
+description = "ripgrep (rg) 16.0.0 fast recursive regex search tool for wasm64-submilli-linux-musl"
+license = "MIT OR Unlicense"
+homepage = "https://github.com/BurntSushi/ripgrep"
+build_deps = []
+runtime_deps = []
+
+[source]
+url = "https://github.com/BurntSushi/ripgrep/archive/refs/tags/16.0.0.tar.gz"
+sha256 = "17e7a1a0db80ed9618a0963c7ae4aecb8fce25c70cf7ebed514daf2b38a0d153"
+strip_components = 1

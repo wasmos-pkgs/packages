@@ -1,0 +1,15 @@
+[package]
+name = "fd"
+version = "10.5.2"
+rev = 0
+kind = "runtime"
+description = "fd 10.5.2 fast and user-friendly alternative to find for wasm64-submilli-linux-musl"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/sharkdp/fd"
+build_deps = []
+runtime_deps = []
+
+[source]
+url = "https://github.com/sharkdp/fd/archive/refs/tags/v10.5.2.tar.gz"
+sha256 = "8991b6504cac33c00528050622dfe3f2a0db1be1a6faf99f69b46d1a8f737dc5"
+strip_components = 1
