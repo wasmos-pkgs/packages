@@ -1,0 +1,15 @@
+[package]
+name = "python3.12"
+version = "3.12.16"
+rev = 0
+kind = "runtime"
+description = "Dynamic CPython 3.12.16 (libpython3.12.so, dlopen C-extensions, SSL, SQLite3, zlib, bz2, lzma, curses, epoll, asyncio) for wasm64-submilli-linux-musl"
+license = "PSF-2.0"
+homepage = "https://www.python.org/"
+build_deps = ["zlib", "bzip2", "xz", "sqlite", "openssl", "ncurses"]
+runtime_deps = ["musl", "zlib", "bzip2", "xz", "sqlite", "openssl", "ncurses"]
+
+[source]
+url = "https://www.python.org/ftp/python/3.12.16/Python-3.12.16.tar.xz"
+sha256 = "b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c"
+strip_components = 1

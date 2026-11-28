@@ -1,0 +1,15 @@
+[package]
+name = "python3.14"
+version = "3.14.10"
+rev = 0
+kind = "runtime"
+description = "Dynamic CPython 3.14.10 (libpython3.14.so, dlopen C-extensions, SSL, SQLite3, zlib, bz2, lzma, curses, epoll, asyncio) for wasm64-submilli-linux-musl"
+license = "PSF-2.0"
+homepage = "https://www.python.org/"
+build_deps = ["zlib", "bzip2", "xz", "sqlite", "openssl", "ncurses"]
+runtime_deps = ["musl", "zlib", "bzip2", "xz", "sqlite", "openssl", "ncurses"]
+
+[source]
+url = "https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz"
+sha256 = "de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032"
+strip_components = 1

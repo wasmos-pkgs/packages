@@ -1,0 +1,13 @@
+[package]
+name = "pip3.12"
+version = "26.3"
+rev = 0
+kind = "python"
+description = "Python 3.12 package installer (pip, setuptools, wheel, packaging) preconfigured with the WasmOS linux_wasm64 wheel index (/etc/pip.conf)"
+license = "MIT"
+homepage = "https://pip.pypa.io/"
+build_deps = []
+runtime_deps = ["python3.12"]
+
+[source]
+builtin = true
