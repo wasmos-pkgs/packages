@@ -1,0 +1,13 @@
+[package]
+name = "libcxx-dev"
+version = "21.1.8"
+rev = 0
+kind = "dev"
+description = "LLVM 21.1.8 libc++, libc++abi, and Wasm EH unwinder headers and static libraries for wasm64-submilli-linux-musl"
+license = "Apache-2.0 WITH LLVM-exception"
+homepage = "https://libcxx.llvm.org/"
+build_deps = []
+runtime_deps = ["musl-dev"]
+
+[source]
+builtin = true

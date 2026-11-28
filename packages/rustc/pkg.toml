@@ -1,0 +1,13 @@
+[package]
+name = "rustc"
+version = "1.94.1"
+rev = 0
+kind = "runtime"
+description = "Self-hosted Rust 1.94.1 compiler and wasm64-submilli-linux-musl standard library"
+license = "MIT OR Apache-2.0"
+homepage = "https://www.rust-lang.org/"
+build_deps = []
+runtime_deps = ["clang"]
+
+[source]
+builtin = true

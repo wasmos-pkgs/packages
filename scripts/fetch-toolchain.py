@@ -41,7 +41,12 @@ def sha256_file(path: pathlib.Path) -> str:
 def download_url(url: str, dest: pathlib.Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url)
-    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    tok = (
+        os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or os.environ.get("GHCR_TOKEN")
+        or ""
+    )
     if tok:
         req.add_header("Authorization", f"Bearer {tok}")
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -109,6 +114,7 @@ def main() -> None:
     postlink_tag = str(cfg["postlink"])
     llvm_tag = str(cfg["llvm"])
     musl_tag = str(cfg["musl"])
+    libcxx_tag = str(cfg.get("libcxx", ""))
     rustc_tag = str(cfg["rustc"])
 
     dest = args.dest.resolve()
@@ -122,6 +128,8 @@ def main() -> None:
     fetch_and_extract(repo, postlink_tag, f"{postlink_tag}-{hid}.tar.zst", cache_dir, dest)
     fetch_and_extract(repo, llvm_tag, f"{llvm_tag}-{hid}.tar.zst", cache_dir, dest)
     fetch_and_extract(repo, musl_tag, f"{musl_tag}-wasm64.tar.zst", cache_dir, dest)
+    if libcxx_tag:
+        fetch_and_extract(repo, libcxx_tag, f"{libcxx_tag}-wasm64.tar.zst", cache_dir, dest)
     fetch_and_extract(repo, rustc_tag, f"{rustc_tag}-{hid}.tar.zst", cache_dir, dest / "rustc")
 
     # Place wasmos-postlink beside clang so Clang locates it via GetProgramPath

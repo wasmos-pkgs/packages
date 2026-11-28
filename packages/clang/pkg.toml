@@ -1,0 +1,13 @@
+[package]
+name = "clang"
+version = "21.1.8"
+rev = 0
+kind = "runtime"
+description = "Self-hosted LLVM/Clang 21.1.8 C/C++20 compiler, wasm-ld linker, and binutils for wasm64-submilli-linux-musl"
+license = "Apache-2.0 WITH LLVM-exception"
+homepage = "https://clang.llvm.org/"
+build_deps = []
+runtime_deps = ["postlink", "musl-dev", "libcxx-dev"]
+
+[source]
+builtin = true

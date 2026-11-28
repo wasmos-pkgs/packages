@@ -1,0 +1,13 @@
+[package]
+name = "musl-dev"
+version = "1.2.5"
+rev = 0
+kind = "dev"
+description = "musl 1.2.5 C headers, Linux 6.12 UAPI headers, CRT objects, static libc, and compiler-rt builtins for wasm64-submilli-linux-musl"
+license = "MIT"
+homepage = "https://musl.libc.org/"
+build_deps = []
+runtime_deps = ["musl"]
+
+[source]
+builtin = true
