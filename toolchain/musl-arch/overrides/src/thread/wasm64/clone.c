@@ -35,24 +35,24 @@ void __submilli_thread_start(long boot_ptr)
 
 int __clone(int (*func)(void *), void *stack, int flags, void *arg, ...)
 {
-	va_list ap;
-	pid_t *ptid = 0, *ctid = 0;
-	void *tls = 0;
+	if (flags & CLONE_THREAD) {
+		va_list ap;
+		pid_t *ptid = 0, *ctid = 0;
+		void *tls = 0;
 
-	va_start(ap, arg);
-	if (flags & (CLONE_PARENT_SETTID | CLONE_PIDFD))
-		ptid = va_arg(ap, pid_t *);
-	else
-		(void)va_arg(ap, pid_t *);
-	if (flags & CLONE_SETTLS)
-		tls = va_arg(ap, void *);
-	else
-		(void)va_arg(ap, void *);
-	if (flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID))
-		ctid = va_arg(ap, pid_t *);
-	va_end(ap);
+		va_start(ap, arg);
+		if (flags & (CLONE_PARENT_SETTID | CLONE_PIDFD))
+			ptid = va_arg(ap, pid_t *);
+		else
+			(void)va_arg(ap, pid_t *);
+		if (flags & CLONE_SETTLS)
+			tls = va_arg(ap, void *);
+		else
+			(void)va_arg(ap, void *);
+		if (flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID))
+			ctid = va_arg(ap, pid_t *);
+		va_end(ap);
 
-	if (flags & CLONE_VM) {
 		uintptr_t sp = ((uintptr_t)stack - sizeof(struct __submilli_thread_boot)) & ~(uintptr_t)15U;
 		struct __submilli_thread_boot *boot = (struct __submilli_thread_boot *)sp;
 		struct __pthread *td = (struct __pthread *)tls;
@@ -64,6 +64,8 @@ int __clone(int (*func)(void *), void *stack, int flags, void *arg, ...)
 			(long)flags, (long)sp, (long)ptid, (long)boot, (long)ctid);
 	}
 
+	/* Process-spawning clone (e.g. musl posix_spawn with CLONE_VM|CLONE_VFORK|SIGCHLD):
+	 * emulate via full SYS_fork() so the child runs func(arg) in an isolated address space. */
 	long ret = __wali_sys_fork();
 	if (ret == 0) {
 		int code = func(arg);
