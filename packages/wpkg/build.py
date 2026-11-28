@@ -27,7 +27,7 @@ def main() -> None:
     target_dir = BUILD / "target"
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    cargo_wasmos = TOOLCHAIN / "rust/cargo-wasmos.py"
+    cargo_wasmos = pathlib.Path(__file__).resolve().parents[2] / "scripts/cargo-wasmos.py"
     cmd = [
         sys.executable,
         str(cargo_wasmos),

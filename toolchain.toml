@@ -1,0 +1,6 @@
+[toolchain]
+repo = "wasmos-pkgs/toolchain"
+postlink = "postlink-0.1.0_submilli-0.1"
+llvm = "llvm-21.1.8_submilli-0.1"
+musl = "musl-1.2.5_submilli-0.1"
+rustc = "rustc-1.94.1_submilli-0.1"

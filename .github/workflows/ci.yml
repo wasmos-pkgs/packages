@@ -10,10 +10,6 @@ on:
       - "**/*.md"
   workflow_dispatch:
     inputs:
-      rebuild_toolchain:
-        description: "Rebuild and publish the wasm64-submilli-linux-musl toolchain"
-        type: boolean
-        default: false
       packages:
         description: "Comma-separated package names (e.g. 'bash,python'), 'all', or empty for none"
         type: string
@@ -33,13 +29,11 @@ concurrency:
 
 env:
   WASMOS_OCI_ORG: wasmos-pkgs
-  TOOLCHAIN_TAG: latest
 
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      build_toolchain: ${{ steps.plan.outputs.build_toolchain }}
       has_package_changes: ${{ steps.plan.outputs.has_package_changes }}
       has_changes: ${{ steps.plan.outputs.has_changes }}
       wave1: ${{ steps.plan.outputs.wave1 }}
@@ -65,120 +59,20 @@ jobs:
       - id: plan
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TC_FLAG="false"
-            if [[ "${{ inputs.rebuild_toolchain }}" == "true" ]]; then
-              TC_FLAG="true"
-            fi
             PKGS="${{ inputs.packages }}"
             if [[ -z "$PKGS" ]]; then
               PKGS="none"
             fi
-            python3 scripts/plan-ci.py --toolchain "$TC_FLAG" --packages "$PKGS"
+            python3 scripts/plan-ci.py --packages "$PKGS"
           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
             python3 scripts/plan-ci.py --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"
           else
             python3 scripts/plan-ci.py --base "${{ github.event.before }}" --head "${{ github.sha }}"
           fi
 
-  toolchain:
-    needs: plan
-    if: needs.plan.outputs.build_toolchain == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install host build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build ccache lld zstd curl git python3
-
-      - name: Setup Rust toolchain (for wasmos-postlink & Rust target smoke-test)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-src
-
-      - name: Restore ccache for LLVM
-        id: ccache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: llvm-ccache-${{ hashFiles('toolchain/patches/**') }}
-          restore-keys: |
-            llvm-ccache-
-
-      - name: Build wasm64-submilli-linux-musl toolchain
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
-          CCACHE_MAXSIZE: 4G
-        run: |
-          ccache --zero-stats
-          python3 toolchain/build.py --out dist/toolchain.tar.zst
-          ccache --show-stats
-
-      - name: Save ccache for LLVM
-        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: llvm-ccache-${{ hashFiles('toolchain/patches/**') }}
-
-      - name: Smoke-test compiled toolchain (C and Rust std)
-        run: |
-          mkdir -p /tmp/test-tc
-          tar --zstd -xf dist/toolchain.tar.zst -C /tmp/test-tc
-          cat <<'EOF' > /tmp/hello.c
-          #include <stdio.h>
-          int main(void) { puts("hello"); return 0; }
-          EOF
-          /tmp/test-tc/bin/wasm64-submilli-linux-musl-clang -O2 /tmp/hello.c -o /tmp/hello.wasm
-          ls -lh /tmp/hello.wasm
-
-          mkdir -p /tmp/rust-smoke/src
-          cat <<'EOF' > /tmp/rust-smoke/Cargo.toml
-          [package]
-          name = "rust-smoke"
-          version = "0.1.0"
-          edition = "2021"
-          EOF
-          cat <<'EOF' > /tmp/rust-smoke/src/main.rs
-          fn main() {
-              println!("hello from rust std: {:?}", std::env::args().collect::<Vec<_>>());
-          }
-          EOF
-          python3 /tmp/test-tc/rust/cargo-wasmos.py --toolchain /tmp/test-tc -- build --release --manifest-path /tmp/rust-smoke/Cargo.toml
-          ls -lh /tmp/rust-smoke/target/wasm64-submilli-linux-musl/release/rust-smoke
-
-      - name: Publish toolchain to GHCR
-        if: needs.plan.outputs.should_push == 'true'
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: |
-          TC_VER=$(python3 -c "import sys; sys.path.insert(0, 'scripts'); import toml_loader; print(toml_loader.loads(open('toolchain/toolchain.toml').read())['toolchain']['version'])")
-          SHORT_SHA="${GITHUB_SHA::8}"
-          python3 scripts/oci.py push \
-            --repo "${{ env.WASMOS_OCI_ORG }}/toolchain" \
-            --tag "${TC_VER}" \
-            --tag "${TC_VER}-${SHORT_SHA}" \
-            --tag latest \
-            --file dist/toolchain.tar.zst \
-            --arch amd64 \
-            --os linux \
-            --annotation "org.opencontainers.image.version=${TC_VER}" \
-            --annotation "org.opencontainers.image.description=wasm64-submilli-linux-musl cross-compilation toolchain"
-
-      - name: Upload PR toolchain artifact for package jobs
-        if: needs.plan.outputs.should_push != 'true' && needs.plan.outputs.has_package_changes == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: toolchain-pr
-          path: dist/toolchain.tar.zst
-          retention-days: 1
-
   wave1:
-    needs: [plan, toolchain]
-    if: always() && needs.plan.outputs.wave1 != '[]' && (needs.toolchain.result == 'success' || needs.toolchain.result == 'skipped')
+    needs: plan
+    if: needs.plan.outputs.wave1 != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -192,29 +86,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3 perl xz-utils pkg-config
 
-      - name: Setup Rust toolchain (for Rust packages)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cache toolchain downloads
+        uses: actions/cache@v4
         with:
-          components: rust-src
+          path: /tmp/tc-cache
+          key: wasmos-toolchain-linux-amd64-${{ hashFiles('toolchain.toml') }}
 
-      - name: Download PR toolchain artifact
-        if: needs.toolchain.result == 'success' && needs.plan.outputs.should_push != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: toolchain-pr
-          path: /tmp/toolchain-pr
-
-      - name: Prepare toolchain
+      - name: Prepare toolchain from wasmos-pkgs/toolchain releases
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: |
-          mkdir -p /tmp/wasmos-toolchain
-          if [[ -f /tmp/toolchain-pr/toolchain.tar.zst ]]; then
-            tar --zstd -xf /tmp/toolchain-pr/toolchain.tar.zst -C /tmp/wasmos-toolchain
-          else
-            python3 scripts/oci.py pull --repo "${{ env.WASMOS_OCI_ORG }}/toolchain" --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/fetch-toolchain.py --dest /tmp/wasmos-toolchain --cache-dir /tmp/tc-cache
 
       - name: Build ${{ matrix.package }}
         env:
@@ -239,8 +120,8 @@ jobs:
           retention-days: 1
 
   wave2:
-    needs: [plan, toolchain, wave1]
-    if: always() && needs.plan.outputs.wave2 != '[]' && (needs.toolchain.result == 'success' || needs.toolchain.result == 'skipped') && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped')
+    needs: [plan, wave1]
+    if: always() && needs.plan.outputs.wave2 != '[]' && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -254,29 +135,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3 perl xz-utils pkg-config
 
-      - name: Setup Rust toolchain (for Rust packages)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cache toolchain downloads
+        uses: actions/cache@v4
         with:
-          components: rust-src
+          path: /tmp/tc-cache
+          key: wasmos-toolchain-linux-amd64-${{ hashFiles('toolchain.toml') }}
 
-      - name: Download PR toolchain artifact
-        if: needs.toolchain.result == 'success' && needs.plan.outputs.should_push != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: toolchain-pr
-          path: /tmp/toolchain-pr
-
-      - name: Prepare toolchain
+      - name: Prepare toolchain from wasmos-pkgs/toolchain releases
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: |
-          mkdir -p /tmp/wasmos-toolchain
-          if [[ -f /tmp/toolchain-pr/toolchain.tar.zst ]]; then
-            tar --zstd -xf /tmp/toolchain-pr/toolchain.tar.zst -C /tmp/wasmos-toolchain
-          else
-            python3 scripts/oci.py pull --repo "${{ env.WASMOS_OCI_ORG }}/toolchain" --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/fetch-toolchain.py --dest /tmp/wasmos-toolchain --cache-dir /tmp/tc-cache
 
       - name: Download wave1 artifacts (PR dry-run)
         if: needs.plan.outputs.should_push != 'true' && needs.wave1.result == 'success'
@@ -313,8 +181,8 @@ jobs:
           retention-days: 1
 
   wave3:
-    needs: [plan, toolchain, wave1, wave2]
-    if: always() && needs.plan.outputs.wave3 != '[]' && (needs.toolchain.result == 'success' || needs.toolchain.result == 'skipped') && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') && (needs.wave2.result == 'success' || needs.wave2.result == 'skipped')
+    needs: [plan, wave1, wave2]
+    if: always() && needs.plan.outputs.wave3 != '[]' && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') && (needs.wave2.result == 'success' || needs.wave2.result == 'skipped')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -328,29 +196,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3 perl xz-utils pkg-config
 
-      - name: Setup Rust toolchain (for Rust packages)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cache toolchain downloads
+        uses: actions/cache@v4
         with:
-          components: rust-src
+          path: /tmp/tc-cache
+          key: wasmos-toolchain-linux-amd64-${{ hashFiles('toolchain.toml') }}
 
-      - name: Download PR toolchain artifact
-        if: needs.toolchain.result == 'success' && needs.plan.outputs.should_push != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: toolchain-pr
-          path: /tmp/toolchain-pr
-
-      - name: Prepare toolchain
+      - name: Prepare toolchain from wasmos-pkgs/toolchain releases
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: |
-          mkdir -p /tmp/wasmos-toolchain
-          if [[ -f /tmp/toolchain-pr/toolchain.tar.zst ]]; then
-            tar --zstd -xf /tmp/toolchain-pr/toolchain.tar.zst -C /tmp/wasmos-toolchain
-          else
-            python3 scripts/oci.py pull --repo "${{ env.WASMOS_OCI_ORG }}/toolchain" --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/fetch-toolchain.py --dest /tmp/wasmos-toolchain --cache-dir /tmp/tc-cache
 
       - name: Download prior wave artifacts (PR dry-run)
         if: needs.plan.outputs.should_push != 'true'
@@ -378,9 +233,17 @@ jobs:
             $DEPS_FLAG \
             $PUSH_FLAG
 
+      - name: Upload wave3 artifact for downstream waves
+        if: needs.plan.outputs.wave4 != '[]' && needs.plan.outputs.should_push != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wave3-${{ matrix.package }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
   wave4:
-    needs: [plan, toolchain, wave1, wave2, wave3]
-    if: always() && needs.plan.outputs.wave4 != '[]' && (needs.toolchain.result == 'success' || needs.toolchain.result == 'skipped') && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') && (needs.wave2.result == 'success' || needs.wave2.result == 'skipped') && (needs.wave3.result == 'success' || needs.wave3.result == 'skipped')
+    needs: [plan, wave1, wave2, wave3]
+    if: always() && needs.plan.outputs.wave4 != '[]' && (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') && (needs.wave2.result == 'success' || needs.wave2.result == 'skipped') && (needs.wave3.result == 'success' || needs.wave3.result == 'skipped')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -394,29 +257,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential zstd ncurses-bin curl git python3 perl xz-utils pkg-config
 
-      - name: Setup Rust toolchain (for Rust packages)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cache toolchain downloads
+        uses: actions/cache@v4
         with:
-          components: rust-src
+          path: /tmp/tc-cache
+          key: wasmos-toolchain-linux-amd64-${{ hashFiles('toolchain.toml') }}
 
-      - name: Download PR toolchain artifact
-        if: needs.toolchain.result == 'success' && needs.plan.outputs.should_push != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: toolchain-pr
-          path: /tmp/toolchain-pr
-
-      - name: Prepare toolchain
+      - name: Prepare toolchain from wasmos-pkgs/toolchain releases
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: |
-          mkdir -p /tmp/wasmos-toolchain
-          if [[ -f /tmp/toolchain-pr/toolchain.tar.zst ]]; then
-            tar --zstd -xf /tmp/toolchain-pr/toolchain.tar.zst -C /tmp/wasmos-toolchain
-          else
-            python3 scripts/oci.py pull --repo "${{ env.WASMOS_OCI_ORG }}/toolchain" --tag "${{ env.TOOLCHAIN_TAG }}" --dest /tmp/wasmos-toolchain
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/fetch-toolchain.py --dest /tmp/wasmos-toolchain --cache-dir /tmp/tc-cache
 
       - name: Download prior wave artifacts (PR dry-run)
         if: needs.plan.outputs.should_push != 'true'
@@ -445,12 +295,11 @@ jobs:
             $PUSH_FLAG
 
   publish-index:
-    needs: [plan, toolchain, wave1, wave2, wave3, wave4]
+    needs: [plan, wave1, wave2, wave3, wave4]
     if: |
       always() &&
       needs.plan.outputs.has_package_changes == 'true' &&
       needs.plan.outputs.should_push == 'true' &&
-      (needs.toolchain.result == 'success' || needs.toolchain.result == 'skipped') &&
       (needs.wave1.result == 'success' || needs.wave1.result == 'skipped') &&
       (needs.wave2.result == 'success' || needs.wave2.result == 'skipped') &&
       (needs.wave3.result == 'success' || needs.wave3.result == 'skipped') &&

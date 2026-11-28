@@ -50,7 +50,7 @@ def main() -> None:
     env["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = "s"
     env["CARGO_PROFILE_RELEASE_LTO"] = "thin"
 
-    cargo_wasmos = TOOLCHAIN / "rust/cargo-wasmos.py"
+    cargo_wasmos = pathlib.Path(__file__).resolve().parents[2] / "scripts/cargo-wasmos.py"
     cmd = [
         sys.executable,
         str(cargo_wasmos),

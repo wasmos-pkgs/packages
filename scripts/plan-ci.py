@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Compute toolchain rebuild flag and topological package build waves for GitHub Actions CI.
+"""Compute topological package build waves for GitHub Actions CI.
 
 Detects:
-  - `build_toolchain`: true when any non-Markdown file under `toolchain/` or `scripts/oci.py` changed.
   - `wave1..wave4`: changed packages under `packages/<name>/**` expanded transitively across
     static-linking `build_deps`, grouped into parallel DAG waves.
+  - Changes to `toolchain.toml` or core build scripts (`scripts/{build-pkg,fetch-toolchain,cargo-wasmos,oci,toml_loader}.py`)
+    rebuild all packages.
 """
 
 from __future__ import annotations
@@ -24,6 +25,15 @@ import toml_loader as tomllib  # noqa: E402
 PACKAGES_DIR = REPO_ROOT / "packages"
 MAX_WAVES = 4
 
+GLOBAL_REBUILD_FILES = {
+    "toolchain.toml",
+    "scripts/build-pkg.py",
+    "scripts/fetch-toolchain.py",
+    "scripts/cargo-wasmos.py",
+    "scripts/oci.py",
+    "scripts/toml_loader.py",
+}
+
 
 def load_packages() -> dict[str, dict[str, object]]:
     pkgs: dict[str, dict[str, object]] = {}
@@ -41,10 +51,7 @@ def load_packages() -> dict[str, dict[str, object]]:
 
 def changed_files(base: str, head: str) -> list[str]:
     if not base or set(base) == {"0"}:
-        # Initial push / brand-new branch: build toolchain and all packages.
-        files = ["toolchain/toolchain.toml"]
-        files.extend(f"packages/{p.parent.name}/pkg.toml" for p in PACKAGES_DIR.glob("*/pkg.toml"))
-        return files
+        return [f"packages/{p.parent.name}/pkg.toml" for p in PACKAGES_DIR.glob("*/pkg.toml")]
     out = subprocess.check_output(
         ["git", "diff", "--name-only", f"{base}...{head}"],
         cwd=REPO_ROOT,
@@ -64,7 +71,6 @@ def compute_waves(all_pkgs: dict[str, dict[str, object]], seeds: set[str]) -> li
                 raise SystemExit(f"Package '{name}' depends on unknown package '{dep}'")
             dependents[dep].add(name)
 
-    # Expand seeds transitively to downstream dependents (static linking).
     selected: set[str] = set()
     q = deque(sorted(seeds))
     while q:
@@ -104,23 +110,11 @@ def main() -> None:
     parser.add_argument("--base", default="", help="Base git SHA for diff")
     parser.add_argument("--head", default="HEAD", help="Head git SHA for diff")
     parser.add_argument("--packages", default="", help="Explicit comma-separated package names, 'all', or ''")
-    parser.add_argument(
-        "--toolchain",
-        choices=("auto", "true", "false"),
-        default="auto",
-        help="Whether to rebuild the toolchain ('auto' inspects git diff)",
-    )
     parser.add_argument("--github-output", type=pathlib.Path, default=None)
     args = parser.parse_args()
 
     all_pkgs = load_packages()
     seeds: set[str] = set()
-    build_toolchain = False
-
-    if args.toolchain == "true":
-        build_toolchain = True
-    elif args.toolchain == "false":
-        build_toolchain = False
 
     explicit = args.packages.strip()
     if explicit:
@@ -134,14 +128,7 @@ def main() -> None:
                 if name not in all_pkgs:
                     raise SystemExit(f"Unknown package requested: '{name}'")
                 seeds.add(name)
-    elif args.toolchain == "auto":
-        head_msg = subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%B", args.head],
-            cwd=REPO_ROOT,
-            text=True,
-        )
-        if "[rebuild toolchain]" in head_msg.lower() or "[rebuild-toolchain]" in head_msg.lower():
-            build_toolchain = True
+    else:
         files = changed_files(args.base, args.head)
         rebuild_all_pkgs = False
         for f in files:
@@ -149,20 +136,17 @@ def main() -> None:
             parts = p.parts
             if p.suffix == ".md":
                 continue
-            if parts and parts[0] == "toolchain":
-                build_toolchain = True
-            elif len(parts) >= 2 and parts[0] == "packages" and parts[1] in all_pkgs:
+            if len(parts) >= 2 and parts[0] == "packages" and parts[1] in all_pkgs:
                 seeds.add(parts[1])
-            elif f in ("scripts/build-pkg.py", "scripts/oci.py", "scripts/toml_loader.py"):
+            elif f in GLOBAL_REBUILD_FILES:
                 rebuild_all_pkgs = True
         if rebuild_all_pkgs:
             seeds = set(all_pkgs.keys())
 
     waves = compute_waves(all_pkgs, seeds)
     result = {
-        "build_toolchain": build_toolchain,
         "has_package_changes": bool(waves),
-        "has_changes": bool(build_toolchain or waves),
+        "has_changes": bool(waves),
         "total_packages": sum(len(w) for w in waves),
         "waves": waves,
     }
@@ -173,9 +157,8 @@ def main() -> None:
     )
     if gh_out:
         with gh_out.open("a", encoding="utf-8") as f:
-            f.write(f"build_toolchain={'true' if build_toolchain else 'false'}\n")
             f.write(f"has_package_changes={'true' if waves else 'false'}\n")
-            f.write(f"has_changes={'true' if (build_toolchain or waves) else 'false'}\n")
+            f.write(f"has_changes={'true' if waves else 'false'}\n")
             for idx in range(MAX_WAVES):
                 wave_list = waves[idx] if idx < len(waves) else []
                 f.write(f"wave{idx + 1}={json.dumps(wave_list)}\n")

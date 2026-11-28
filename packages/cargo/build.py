@@ -39,7 +39,7 @@ def fetch_crate(name: str, version: str, patches_dir: pathlib.Path) -> pathlib.P
     return dst
 
 
-def prepare_crate_patches(patches_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+def prepare_crate_patches(patches_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
     # 1. linux-raw-sys: map wasm64 to identical asm-generic LP64 aarch64 Linux UAPI bindings
     lrs = fetch_crate("linux-raw-sys", "0.11.0", patches_dir)
     lrs_lib = lrs / "src/lib.rs"
@@ -77,17 +77,7 @@ def prepare_crate_patches(patches_dir: pathlib.Path) -> tuple[pathlib.Path, path
             raise SystemExit("Failed to patch rustix-1.1.3 c.rs statx_flags")
         rustix_c.write_text(new_c, encoding="utf-8")
 
-    # 3. zlib-rs: opt into unstable simd_wasm64 when building with stock rustc + RUSTC_BOOTSTRAP=1
-    zlib_rs = fetch_crate("zlib-rs", "0.5.5", patches_dir)
-    zlib_lib = zlib_rs / "src/lib.rs"
-    zlib_text = zlib_lib.read_text(encoding="utf-8")
-    if "simd_wasm64" not in zlib_text:
-        zlib_lib.write_text(
-            '#![cfg_attr(target_arch = "wasm64", feature(simd_wasm64))]\n' + zlib_text,
-            encoding="utf-8",
-        )
-
-    return lrs, rustix, zlib_rs
+    return lrs, rustix
 
 
 def main() -> None:
@@ -101,7 +91,7 @@ def main() -> None:
         usr_link.symlink_to(".")
 
     patches_dir = BUILD / "crate-patches"
-    lrs_dir, rustix_dir, zlib_rs_dir = prepare_crate_patches(patches_dir)
+    lrs_dir, rustix_dir = prepare_crate_patches(patches_dir)
 
     target_dir = BUILD / "target"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -118,7 +108,7 @@ def main() -> None:
     extra_rf = env.get("RUSTFLAGS", "").strip()
     env["RUSTFLAGS"] = f"{extra_rf} -L native={SYSROOT / 'lib'}".strip()
 
-    cargo_wasmos = TOOLCHAIN / "rust/cargo-wasmos.py"
+    cargo_wasmos = pathlib.Path(__file__).resolve().parents[2] / "scripts/cargo-wasmos.py"
     cmd = [
         sys.executable,
         str(cargo_wasmos),
@@ -137,8 +127,6 @@ def main() -> None:
         f'patch.crates-io.linux-raw-sys.path="{lrs_dir}"',
         "--config",
         f'patch.crates-io.rustix.path="{rustix_dir}"',
-        "--config",
-        f'patch.crates-io.zlib-rs.path="{zlib_rs_dir}"',
     ]
     subprocess.run(cmd, env=env, check=True)
 
