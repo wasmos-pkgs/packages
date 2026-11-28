@@ -20,7 +20,7 @@ TRIPLE = "wasm64-submilli-linux-musl"
 
 
 def main() -> None:
-    manifest = SRC / "userland/wpkg/Cargo.toml"
+    manifest = SRC / "crates/wpkg/Cargo.toml"
     if not manifest.is_file():
         raise SystemExit(f"Missing wpkg manifest: {manifest}")
 

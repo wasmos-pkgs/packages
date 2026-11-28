@@ -1,7 +1,7 @@
 [package]
 name = "wpkg"
 version = "0.1.0"
-rev = 0
+rev = 1
 kind = "runtime"
 description = "WasmOS package manager for linux/wasm64 OCI packages on ghcr.io/wasmos-pkgs"
 license = "Apache-2.0"
@@ -12,4 +12,4 @@ runtime_deps = []
 [source]
 git = "https://github.com/submilli/wasmos.git"
 branch = "main"
-rev = "f9167e84e07bf19fc4ea6b83f549ab4b3e670bc2"
+rev = "c87891a9522a3f27d02213315af5ce6c28a6bbcd"
